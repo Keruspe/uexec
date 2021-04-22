@@ -1,0 +1,8 @@
+[package]
+name = "uexec"
+version = "0.1.0"
+authors = ["Marc-Antoine Perennou <Marc-Antoine@Perennou.com>"]
+edition = "2018"
+
+[dependencies]
+parking_lot = "^0.11"
