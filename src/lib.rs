@@ -59,6 +59,33 @@ impl FutureHolder {
     }
 }
 
+/* Facility to return data from block_on */
+struct Receiver<'a, T: 'a> {
+    recv: Pin<Box<async_channel::Recv<'a, T>>>,
+    waker: Waker,
+}
+
+impl<'a, T: 'a> Receiver<'a, T> {
+    fn new(receiver: &'a async_channel::Receiver<T>, thread: Thread) -> Self {
+        Self {
+            recv: Box::pin(receiver.recv()),
+            waker: Arc::new(ReceiverWaker(thread)).into(),
+        }
+    }
+
+    fn poll(&mut self) -> Poll<T> {
+        let mut ctx = Context::from_waker(&self.waker);
+        self.recv.as_mut().poll(&mut ctx).map(|res| res.expect("channel not expected to fail"))
+    }
+}
+
+struct ReceiverWaker(Thread);
+impl Wake for ReceiverWaker {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+}
+
 /* The actual executor */
 struct Executor {
     task_id: AtomicU64,
@@ -91,22 +118,33 @@ impl Executor {
         }
     }
 
-    fn block_on<F: Future<Output = ()> + 'static>(&self, future: F) {
+    fn block_on<R: 'static, F: Future<Output = R> + 'static>(&self, future: F) -> R {
+        let mut main_exited = false;
         let main_id = self.next_task_id();
-        let future = self.wrap(main_id, future);
+        let (sender, receiver) = async_channel::bounded(1);
+        let mut receiver = Receiver::new(&receiver, self.thread.clone());
+        let future = self.wrap(main_id, async move {
+            let res = future.await;
+            drop(sender.send(res).await);
+        });
         if self.poll_future(main_id, future) {
-            return;
+            main_exited = true;
         }
         loop {
-            thread::park();
             while let Some(id) = self.tasks.next() {
                 let future = self.state.lock().remove(&id);
                 if let Some(future) = future {
                     if self.poll_future(id, future) && main_id == id {
-                        return;
+                        main_exited = true;
                     }
                 }
             }
+            if main_exited {
+                if let Poll::Ready(res) = receiver.poll() {
+                    return res;
+                }
+            }
+            thread::park();
         }
     }
 
@@ -132,7 +170,7 @@ thread_local! {
     static EXECUTOR: Executor = Default::default();
 }
 
-pub fn block_on<F: Future<Output = ()> + 'static>(future: F) {
+pub fn block_on<R: 'static, F: Future<Output = R> + 'static>(future: F) -> R {
     EXECUTOR.with(|executor| executor.block_on(future))
 }
 

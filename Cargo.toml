@@ -5,4 +5,5 @@ authors = ["Marc-Antoine Perennou <Marc-Antoine@Perennou.com>"]
 edition = "2018"
 
 [dependencies]
+async-channel = "^1.0"
 parking_lot = "^0.11"

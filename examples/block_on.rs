@@ -36,6 +36,7 @@ impl Future for CountDown {
 }
 
 fn main() {
+    assert_eq!(uexec::block_on(async { 3 + 1 }), 4);
     let future = CountDown(10);
     uexec::block_on(future);
 }
