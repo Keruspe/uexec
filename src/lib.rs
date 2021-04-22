@@ -62,14 +62,21 @@ impl Wake for MyWaker {
 
 /* Holds the future and its waker */
 struct FutureHolder {
+    id: u64,
     future: Pin<Box<dyn Future<Output = ()>>>,
     waker: Waker,
 }
 
 impl FutureHolder {
-    fn poll(&mut self) -> Poll<()> {
+    fn run(mut self, state: &State) -> bool {
         let mut ctx = Context::from_waker(&self.waker);
-        self.future.as_mut().poll(&mut ctx)
+        match self.future.as_mut().poll(&mut ctx) {
+            Poll::Ready(()) => true,
+            Poll::Pending => {
+                state.register(self.id, self);
+                false
+            }
+        }
     }
 }
 
@@ -94,6 +101,7 @@ impl<'a, T: 'a> Receiver<'a, T> {
 }
 
 struct ReceiverWaker(Thread);
+
 impl Wake for ReceiverWaker {
     fn wake(self: Arc<Self>) {
         self.0.unpark();
@@ -120,13 +128,11 @@ impl Default for Executor {
 }
 
 impl Executor {
-    fn next_task_id(&self) -> u64 {
-        self.task_id.fetch_add(1, Ordering::SeqCst)
-    }
-
-    fn wrap<F: Future<Output = ()> + 'static>(&self, id: u64, future: F) -> FutureHolder {
+    fn wrap<F: Future<Output = ()> + 'static>(&self, future: F) -> FutureHolder {
+        let id = self.task_id.fetch_add(1, Ordering::SeqCst);
         let waker = Arc::new(MyWaker::new(id, self.tasks.clone(), self.thread.clone()));
         FutureHolder {
+            id,
             future: Box::pin(future),
             waker: waker.into(),
         }
@@ -134,21 +140,21 @@ impl Executor {
 
     fn block_on<R: 'static, F: Future<Output = R> + 'static>(&self, future: F) -> R {
         let mut main_exited = false;
-        let main_id = self.next_task_id();
         let (sender, receiver) = async_channel::bounded(1);
         let mut receiver = Receiver::new(&receiver, self.thread.clone());
-        let future = self.wrap(main_id, async move {
+        let future = self.wrap(async move {
             let res = future.await;
             drop(sender.send(res).await);
         });
-        if self.poll_future(main_id, future) {
+        let main_id = future.id;
+        if future.run(&self.state) {
             main_exited = true;
         }
         loop {
             while let Some(id) = self.tasks.next() {
                 let future = self.state.take(id);
                 if let Some(future) = future {
-                    if self.poll_future(id, future) && main_id == id {
+                    if future.run(&self.state) && main_id == id {
                         main_exited = true;
                     }
                 }
@@ -163,19 +169,8 @@ impl Executor {
     }
 
     fn spawn<F: Future<Output = ()> + 'static>(&self, future: F) {
-        let id = self.next_task_id();
-        let future = self.wrap(id, future);
-        self.poll_future(id, future);
-    }
-
-    fn poll_future(&self, id: u64, mut future: FutureHolder) -> bool {
-        match future.poll() {
-            Poll::Ready(()) => true,
-            Poll::Pending => {
-                self.state.register(id, future);
-                false
-            }
-        }
+        let future = self.wrap(future);
+        future.run(&self.state);
     }
 }
 
