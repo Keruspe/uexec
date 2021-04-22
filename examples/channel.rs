@@ -1,4 +1,7 @@
-use std::sync::{Arc, atomic::{AtomicU8, Ordering}};
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+};
 
 static COUNT: u8 = 8;
 

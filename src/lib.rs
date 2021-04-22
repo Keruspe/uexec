@@ -96,7 +96,10 @@ impl<'a, T: 'a> Receiver<'a, T> {
 
     fn poll(&mut self) -> Poll<T> {
         let mut ctx = Context::from_waker(&self.waker);
-        self.recv.as_mut().poll(&mut ctx).map(|res| res.expect("channel not expected to fail"))
+        self.recv
+            .as_mut()
+            .poll(&mut ctx)
+            .map(|res| res.expect("channel not expected to fail"))
     }
 }
 
