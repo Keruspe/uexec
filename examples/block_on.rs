@@ -19,7 +19,10 @@ impl Future for CountDown {
             println!("Countdown finished in thread {:?}", thread);
             Poll::Ready(())
         } else {
-            println!("Countdown: {} remaining, ran in thread {:?}", self.0, thread);
+            println!(
+                "Countdown: {} remaining, ran in thread {:?}",
+                self.0, thread
+            );
             self.0 -= 1;
 
             if self.0 > 6 {
@@ -41,9 +44,7 @@ impl Future for CountDown {
 fn main() {
     // Run a thread pool of executors
     for _ in 0..THREADS {
-        std::thread::spawn(|| {
-            uexec::block_on(futures_lite::future::pending::<()>())
-        });
+        std::thread::spawn(|| uexec::block_on(futures_lite::future::pending::<()>()));
     }
 
     assert_eq!(uexec::block_on(async { 3 + 1 }), 4);
