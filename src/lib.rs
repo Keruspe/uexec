@@ -110,6 +110,12 @@ impl Executor {
         }
     }
 
+    fn spawn<F: Future<Output = ()> + 'static>(&self, future: F) {
+        let id = next_task_id();
+        let future = self.wrap(id, future);
+        self.poll_future(id, future);
+    }
+
     fn poll_future(&self, id: u64, mut future: FutureHolder) -> bool {
         let waker = future.waker.clone().into();
         let mut ctx = Context::from_waker(&waker);
@@ -130,4 +136,8 @@ thread_local! {
 
 pub fn block_on<F: Future<Output = ()> + 'static>(future: F) {
     EXECUTOR.with(|executor| executor.block_on(future))
+}
+
+pub fn spawn<F: Future<Output = ()> + 'static>(future: F) {
+    EXECUTOR.with(|executor| executor.spawn(future))
 }

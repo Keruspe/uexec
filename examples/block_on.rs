@@ -13,6 +13,11 @@ impl Future for CountDown {
             println!("Countdown: {} remaining", self.0);
             self.0 -= 1;
 
+            if self.0 > 6 {
+                println!("Adding another countdown");
+                uexec::spawn(CountDown(2));
+            }
+
             // Setup out waker to wake the executor after one second
             let waker = cx.waker().clone();
             thread::spawn(move || {
@@ -25,6 +30,6 @@ impl Future for CountDown {
 }
 
 fn main() {
-    let future = CountDown(3);
+    let future = CountDown(10);
     uexec::block_on(future);
 }
