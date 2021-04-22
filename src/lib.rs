@@ -10,6 +10,7 @@ use std::{
     thread::{self, Thread},
 };
 
+use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
 /* List of active threads */
@@ -191,14 +192,12 @@ impl Executor {
 }
 
 /* Implicit executor for the current thread */
-thread_local! {
-    static EXECUTOR: Executor = Default::default();
-}
+static EXECUTOR: Lazy<Executor> = Lazy::new(Executor::default);
 
 pub fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(future: F) -> R {
-    EXECUTOR.with(|executor| executor.block_on(future))
+    EXECUTOR.block_on(future)
 }
 
 pub fn spawn<F: Future<Output = ()> + Send + 'static>(future: F) {
-    EXECUTOR.with(|executor| executor.spawn(future))
+    EXECUTOR.spawn(future)
 }
