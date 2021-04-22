@@ -6,20 +6,11 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    task::{Context, Poll, Wake},
+    task::{Context, Poll, Wake, Waker},
     thread::{self, Thread},
 };
 
 use parking_lot::Mutex;
-
-/* Automaticaly generate a new id for each new task */
-thread_local! {
-    static TASK_ID: AtomicU64 = AtomicU64::default();
-}
-
-fn next_task_id() -> u64 {
-    TASK_ID.with(|generator| generator.fetch_add(1, Ordering::SeqCst))
-}
 
 /* List of tasks that need polling */
 #[derive(Clone, Default)]
@@ -58,19 +49,28 @@ impl Wake for MyWaker {
 /* Holds the future and its waker */
 struct FutureHolder {
     future: Pin<Box<dyn Future<Output = ()>>>,
-    waker: Arc<MyWaker>,
+    waker: Waker,
+}
+
+impl FutureHolder {
+    fn poll(&mut self) -> Poll<()> {
+        let mut ctx = Context::from_waker(&self.waker);
+        self.future.as_mut().poll(&mut ctx)
+    }
 }
 
 /* The actual executor */
 struct Executor {
+    task_id: AtomicU64,
     tasks: Tasks,
     thread: Thread,
-    state: Arc<Mutex<HashMap<u64, FutureHolder>>>,
+    state: Mutex<HashMap<u64, FutureHolder>>,
 }
 
 impl Default for Executor {
     fn default() -> Self {
         Self {
+            task_id: Default::default(),
             tasks: Tasks::default(),
             thread: thread::current(),
             state: Default::default(),
@@ -79,20 +79,20 @@ impl Default for Executor {
 }
 
 impl Executor {
+    fn next_task_id(&self) -> u64 {
+        self.task_id.fetch_add(1, Ordering::SeqCst)
+    }
+
     fn wrap<F: Future<Output = ()> + 'static>(&self, id: u64, future: F) -> FutureHolder {
-        let waker = Arc::new(MyWaker::new(
-            id,
-            self.tasks.clone(),
-            self.thread.clone(),
-        ));
+        let waker = Arc::new(MyWaker::new(id, self.tasks.clone(), self.thread.clone()));
         FutureHolder {
             future: Box::pin(future),
-            waker,
+            waker: waker.into(),
         }
     }
 
     fn block_on<F: Future<Output = ()> + 'static>(&self, future: F) {
-        let main_id = next_task_id();
+        let main_id = self.next_task_id();
         let future = self.wrap(main_id, future);
         if self.poll_future(main_id, future) {
             return;
@@ -111,15 +111,13 @@ impl Executor {
     }
 
     fn spawn<F: Future<Output = ()> + 'static>(&self, future: F) {
-        let id = next_task_id();
+        let id = self.next_task_id();
         let future = self.wrap(id, future);
         self.poll_future(id, future);
     }
 
     fn poll_future(&self, id: u64, mut future: FutureHolder) -> bool {
-        let waker = future.waker.clone().into();
-        let mut ctx = Context::from_waker(&waker);
-        match future.future.as_mut().poll(&mut ctx) {
+        match future.poll() {
             Poll::Ready(()) => true,
             Poll::Pending => {
                 self.state.lock().insert(id, future);

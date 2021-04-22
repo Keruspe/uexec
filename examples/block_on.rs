@@ -1,4 +1,10 @@
-use std::{future::Future, task::{Context, Poll}, pin::Pin, thread, time::Duration};
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+    thread,
+    time::Duration,
+};
 
 struct CountDown(u8);
 
