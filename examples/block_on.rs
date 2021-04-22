@@ -1,5 +1,4 @@
 use std::{future::Future, task::{Context, Poll}, pin::Pin, thread, time::Duration};
-use uexec::Executor;
 
 struct CountDown(u8);
 
@@ -27,6 +26,5 @@ impl Future for CountDown {
 
 fn main() {
     let future = CountDown(3);
-    let mut executor = Executor::default();
-    executor.block_on(future);
+    uexec::block_on(future);
 }

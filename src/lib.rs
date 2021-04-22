@@ -62,10 +62,10 @@ struct FutureHolder {
 }
 
 /* The actual executor */
-pub struct Executor {
+struct Executor {
     tasks: Tasks,
     thread: Thread,
-    state: HashMap<u64, FutureHolder>,
+    state: Arc<Mutex<HashMap<u64, FutureHolder>>>,
 }
 
 impl Default for Executor {
@@ -73,30 +73,35 @@ impl Default for Executor {
         Self {
             tasks: Tasks::default(),
             thread: thread::current(),
-            state: HashMap::default(),
+            state: Default::default(),
         }
     }
 }
 
 impl Executor {
-    pub fn block_on<F: Future<Output = ()> + 'static>(&mut self, future: F) {
-        let main_id = next_task_id();
+    fn wrap<F: Future<Output = ()> + 'static>(&self, id: u64, future: F) -> FutureHolder {
         let waker = Arc::new(MyWaker::new(
-            main_id,
+            id,
             self.tasks.clone(),
             self.thread.clone(),
         ));
-        let holder = FutureHolder {
+        FutureHolder {
             future: Box::pin(future),
             waker,
-        };
-        if self.poll_future(main_id, holder) {
+        }
+    }
+
+    fn block_on<F: Future<Output = ()> + 'static>(&self, future: F) {
+        let main_id = next_task_id();
+        let future = self.wrap(main_id, future);
+        if self.poll_future(main_id, future) {
             return;
         }
         loop {
             thread::park();
             while let Some(id) = self.tasks.next() {
-                if let Some(future) = self.state.remove(&id) {
+                let future = self.state.lock().remove(&id);
+                if let Some(future) = future {
                     if self.poll_future(id, future) && main_id == id {
                         return;
                     }
@@ -105,15 +110,24 @@ impl Executor {
         }
     }
 
-    fn poll_future(&mut self, id: u64, mut future: FutureHolder) -> bool {
+    fn poll_future(&self, id: u64, mut future: FutureHolder) -> bool {
         let waker = future.waker.clone().into();
         let mut ctx = Context::from_waker(&waker);
         match future.future.as_mut().poll(&mut ctx) {
             Poll::Ready(()) => true,
             Poll::Pending => {
-                self.state.insert(id, future);
+                self.state.lock().insert(id, future);
                 false
             }
         }
     }
+}
+
+/* Implicit executor for the current thread */
+thread_local! {
+    static EXECUTOR: Executor = Default::default();
+}
+
+pub fn block_on<F: Future<Output = ()> + 'static>(future: F) {
+    EXECUTOR.with(|executor| executor.block_on(future))
 }
