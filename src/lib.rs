@@ -3,7 +3,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     task::{Context, Poll, Wake, Waker},
@@ -114,6 +114,7 @@ impl Wake for ReceiverWaker {
 /* The actual executor */
 struct Executor {
     task_id: AtomicU64,
+    main_exited: AtomicBool,
     tasks: Tasks,
     thread: Thread,
     state: State,
@@ -123,6 +124,7 @@ impl Default for Executor {
     fn default() -> Self {
         Self {
             task_id: Default::default(),
+            main_exited: Default::default(),
             tasks: Default::default(),
             thread: thread::current(),
             state: Default::default(),
@@ -142,7 +144,6 @@ impl Executor {
     }
 
     fn block_on<R: 'static, F: Future<Output = R> + 'static>(&self, future: F) -> R {
-        let mut main_exited = false;
         let (sender, receiver) = async_channel::bounded(1);
         let mut receiver = Receiver::new(&receiver, self.thread.clone());
         let future = self.wrap(async move {
@@ -151,18 +152,18 @@ impl Executor {
         });
         let main_id = future.id;
         if future.run(&self.state) {
-            main_exited = true;
+            self.main_exited.store(true, Ordering::SeqCst);
         }
         loop {
             while let Some(id) = self.tasks.next() {
                 let future = self.state.take(id);
                 if let Some(future) = future {
                     if future.run(&self.state) && main_id == id {
-                        main_exited = true;
+                        self.main_exited.store(true, Ordering::SeqCst);
                     }
                 }
             }
-            if main_exited {
+            if self.main_exited.load(Ordering::SeqCst) {
                 if let Poll::Ready(res) = receiver.poll() {
                     return res;
                 }
