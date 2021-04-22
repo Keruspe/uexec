@@ -12,6 +12,27 @@ use std::{
 
 use parking_lot::Mutex;
 
+/* List of active threads */
+#[derive(Clone, Default)]
+struct Threads(Arc<Mutex<Vec<Thread>>>);
+
+impl Threads {
+    fn register(&self) {
+        self.0.lock().push(thread::current());
+    }
+
+    fn deregister(&self) {
+        let current = thread::current().id();
+        self.0.lock().retain(|thread| thread.id() != current);
+    }
+
+    fn peek(&self) -> Thread {
+        let threads = self.0.lock();
+        let i = fastrand::usize(..threads.len());
+        threads[i].clone()
+    }
+}
+
 /* List of tasks that need polling */
 #[derive(Clone, Default)]
 struct Tasks(Arc<Mutex<VecDeque<u64>>>);
@@ -44,26 +65,26 @@ impl State {
 struct MyWaker {
     id: u64,
     tasks: Tasks,
-    thread: Thread,
+    threads: Threads,
 }
 
 impl MyWaker {
-    fn new(id: u64, tasks: Tasks, thread: Thread) -> Self {
-        Self { id, tasks, thread }
+    fn new(id: u64, tasks: Tasks, threads: Threads) -> Self {
+        Self { id, tasks, threads }
     }
 }
 
 impl Wake for MyWaker {
     fn wake(self: Arc<Self>) {
         self.tasks.register(self.id);
-        self.thread.unpark();
+        self.threads.peek().unpark();
     }
 }
 
 /* Holds the future and its waker */
 struct FutureHolder {
     id: u64,
-    future: Pin<Box<dyn Future<Output = ()>>>,
+    future: Pin<Box<dyn Future<Output = ()> + Send>>,
     waker: Waker,
 }
 
@@ -112,30 +133,19 @@ impl Wake for ReceiverWaker {
 }
 
 /* The actual executor */
+#[derive(Default)]
 struct Executor {
     task_id: AtomicU64,
     main_exited: AtomicBool,
     tasks: Tasks,
-    thread: Thread,
+    threads: Threads,
     state: State,
 }
 
-impl Default for Executor {
-    fn default() -> Self {
-        Self {
-            task_id: Default::default(),
-            main_exited: Default::default(),
-            tasks: Default::default(),
-            thread: thread::current(),
-            state: Default::default(),
-        }
-    }
-}
-
 impl Executor {
-    fn wrap<F: Future<Output = ()> + 'static>(&self, future: F) -> FutureHolder {
+    fn wrap<F: Future<Output = ()> + Send + 'static>(&self, future: F) -> FutureHolder {
         let id = self.task_id.fetch_add(1, Ordering::SeqCst);
-        let waker = Arc::new(MyWaker::new(id, self.tasks.clone(), self.thread.clone()));
+        let waker = Arc::new(MyWaker::new(id, self.tasks.clone(), self.threads.clone()));
         FutureHolder {
             id,
             future: Box::pin(future),
@@ -143,9 +153,10 @@ impl Executor {
         }
     }
 
-    fn block_on<R: 'static, F: Future<Output = R> + 'static>(&self, future: F) -> R {
+    fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(&self, future: F) -> R {
+        self.threads.register();
         let (sender, receiver) = async_channel::bounded(1);
-        let mut receiver = Receiver::new(&receiver, self.thread.clone());
+        let mut receiver = Receiver::new(&receiver, thread::current());
         let future = self.wrap(async move {
             let res = future.await;
             drop(sender.send(res).await);
@@ -165,6 +176,7 @@ impl Executor {
             }
             if self.main_exited.load(Ordering::SeqCst) {
                 if let Poll::Ready(res) = receiver.poll() {
+                    self.threads.deregister();
                     return res;
                 }
             }
@@ -172,7 +184,7 @@ impl Executor {
         }
     }
 
-    fn spawn<F: Future<Output = ()> + 'static>(&self, future: F) {
+    fn spawn<F: Future<Output = ()> + Send + 'static>(&self, future: F) {
         let future = self.wrap(future);
         future.run(&self.state);
     }
@@ -183,10 +195,10 @@ thread_local! {
     static EXECUTOR: Executor = Default::default();
 }
 
-pub fn block_on<R: 'static, F: Future<Output = R> + 'static>(future: F) -> R {
+pub fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(future: F) -> R {
     EXECUTOR.with(|executor| executor.block_on(future))
 }
 
-pub fn spawn<F: Future<Output = ()> + 'static>(future: F) {
+pub fn spawn<F: Future<Output = ()> + Send + 'static>(future: F) {
     EXECUTOR.with(|executor| executor.spawn(future))
 }
