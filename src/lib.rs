@@ -26,6 +26,20 @@ impl Tasks {
     }
 }
 
+/* The common state containing all the futures */
+#[derive(Default)]
+struct State(Mutex<HashMap<u64, FutureHolder>>);
+
+impl State {
+    fn register(&self, id: u64, future: FutureHolder) {
+        self.0.lock().insert(id, future);
+    }
+
+    fn take(&self, id: u64) -> Option<FutureHolder> {
+        self.0.lock().remove(&id)
+    }
+}
+
 /* Wake the executor after registering us in the list of tasks that need polling */
 struct MyWaker {
     id: u64,
@@ -91,14 +105,14 @@ struct Executor {
     task_id: AtomicU64,
     tasks: Tasks,
     thread: Thread,
-    state: Mutex<HashMap<u64, FutureHolder>>,
+    state: State,
 }
 
 impl Default for Executor {
     fn default() -> Self {
         Self {
             task_id: Default::default(),
-            tasks: Tasks::default(),
+            tasks: Default::default(),
             thread: thread::current(),
             state: Default::default(),
         }
@@ -132,7 +146,7 @@ impl Executor {
         }
         loop {
             while let Some(id) = self.tasks.next() {
-                let future = self.state.lock().remove(&id);
+                let future = self.state.take(id);
                 if let Some(future) = future {
                     if self.poll_future(id, future) && main_id == id {
                         main_exited = true;
@@ -158,7 +172,7 @@ impl Executor {
         match future.poll() {
             Poll::Ready(()) => true,
             Poll::Pending => {
-                self.state.lock().insert(id, future);
+                self.state.register(id, future);
                 false
             }
         }
