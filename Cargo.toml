@@ -9,6 +9,3 @@ async-channel = "^1.6"
 fastrand = "^1.4"
 once_cell = "^1.7"
 parking_lot = "^0.11"
-
-[dev-dependencies]
-futures-lite = "^1.11"
