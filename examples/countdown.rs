@@ -1,5 +1,5 @@
 use std::{
-    future::{self, Future},
+    future::Future,
     pin::Pin,
     task::{Context, Poll},
     thread,
@@ -44,7 +44,7 @@ impl Future for CountDown {
 fn main() {
     // Run a thread pool of executors
     for _ in 0..THREADS {
-        std::thread::spawn(|| uexec::block_on(future::pending::<()>()));
+        std::thread::spawn(|| uexec::worker());
     }
 
     assert_eq!(uexec::block_on(async { 3 + 1 }), 4);

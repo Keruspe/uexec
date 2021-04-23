@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    future::Future,
+    future::{self, Future},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll, Wake, Waker},
@@ -225,4 +225,8 @@ pub fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(futur
 
 pub fn spawn<F: Future<Output = ()> + Send + 'static>(future: F) {
     EXECUTOR.spawn(future)
+}
+
+pub fn worker() {
+    block_on(future::pending())
 }
