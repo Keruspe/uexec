@@ -3,7 +3,6 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
     thread,
-    time::Duration,
 };
 
 static THREADS: u8 = 8;
@@ -33,12 +32,8 @@ impl Future for CountDown {
                 uexec::spawn_local(CountDown(2));
             }
 
-            // Setup out waker to wake the executor after one second
-            let waker = cx.waker().clone();
-            thread::spawn(move || {
-                thread::sleep(Duration::from_secs(1));
-                waker.wake();
-            });
+            // Return Pending but immediately wake the executor
+            cx.waker().wake_by_ref();
             Poll::Pending
         }
     }
@@ -51,6 +46,13 @@ fn main() {
     }
 
     assert_eq!(uexec::block_on(async { 3 + 1 }), 4);
-    let future = CountDown(10);
-    uexec::block_on(future);
+    uexec::block_on(async {
+        let tasks: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![
+            Box::pin(CountDown(5)),
+            Box::pin(uexec::spawn(CountDown(10))),
+        ];
+        for task in tasks {
+            task.await;
+        }
+    });
 }

@@ -1,3 +1,8 @@
+// TODO: support Output in spawn
+// TODO: support canceling
+// TODO: use spawn in block_on
+// TODO: merge State and Executor
+
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::{self, Future},
@@ -7,6 +12,7 @@ use std::{
     thread::{self, Thread},
 };
 
+use futures_core::Stream;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
@@ -48,9 +54,19 @@ impl State {
         !self.0.lock().main_tasks.contains(&id)
     }
 
-    fn setup<F: Future<Output = ()> + Send + 'static>(&self, future: F) {
+    fn setup<F: Future<Output = ()> + Send + 'static>(&self, future: F) -> JoinHandle {
         let id = self.next_task_id();
-        FutureHolder::new(id, future, self.clone()).run();
+        let (sender, receiver) = async_channel::bounded(1);
+        FutureHolder::new(
+            id,
+            async move {
+                future.await;
+                drop(sender.send(()).await);
+            },
+            self.clone(),
+        )
+        .run();
+        JoinHandle(receiver)
     }
 
     fn register(&self, future: FutureHolder) {
@@ -61,12 +77,25 @@ impl State {
         self.0.lock().pollable.push_back(id);
     }
 
+    fn has_pollable_tasks(&self) -> bool {
+        !self.0.lock().pollable.is_empty()
+    }
+
     fn next(&self) -> Option<FutureHolder> {
         let mut inner = self.0.lock();
-        inner
-            .pollable
-            .pop_front()
-            .and_then(|id| inner.futures.remove(&id))
+        let mut future = None;
+        let mut attempts = VecDeque::new();
+        while let Some(id) = inner.pollable.pop_front() {
+            future = inner.futures.remove(&id);
+            if future.is_some() {
+                break;
+            }
+            attempts.push_back(id);
+        }
+        for attempt in attempts {
+            inner.pollable.push_back(attempt);
+        }
+        future
     }
 
     fn with_current_thread(self) -> Self {
@@ -226,12 +255,25 @@ impl Executor {
                     return res;
                 }
             }
-            thread::park();
+            if !self.state.has_pollable_tasks() {
+                thread::park();
+            }
         })
     }
 
-    fn spawn<F: Future<Output = ()> + Send + 'static>(&self, future: F) {
-        self.state.setup(future);
+    fn spawn<F: Future<Output = ()> + Send + 'static>(&self, future: F) -> JoinHandle {
+        self.state.setup(future)
+    }
+}
+
+/* Handle for waiting for spawned tasks completion */
+pub struct JoinHandle(async_channel::Receiver<()>);
+
+impl Future for JoinHandle {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        Pin::new(&mut self.0).poll_next(cx).map(drop)
     }
 }
 
@@ -242,7 +284,7 @@ pub fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(futur
     EXECUTOR.block_on(future)
 }
 
-pub fn spawn<F: Future<Output = ()> + Send + 'static>(future: F) {
+pub fn spawn<F: Future<Output = ()> + Send + 'static>(future: F) -> JoinHandle {
     EXECUTOR.spawn(future)
 }
 
@@ -255,6 +297,7 @@ thread_local! {
     static STATE: State = State::default().with_current_thread();
 }
 
-pub fn spawn_local<F: Future<Output = ()> + 'static>(future: F) {
-    STATE.with(|state| state.setup(LocalFuture(future)))
+pub fn spawn_local<F: Future<Output = ()> + 'static>(future: F) -> JoinHandle {
+    let state = STATE.with(|state| state.clone());
+    state.setup(LocalFuture(future))
 }
