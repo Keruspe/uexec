@@ -1,11 +1,8 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     future::Future,
     pin::Pin,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::Arc,
     task::{Context, Poll, Wake, Waker},
     thread::{self, Thread},
 };
@@ -19,7 +16,10 @@ struct State(Arc<Mutex<StateInner>>);
 
 #[derive(Default)]
 struct StateInner {
+    /* Generate a new id for each task */
     task_id: u64,
+    /* The list of "main" block_on tasks */
+    main_tasks: HashSet<u64>,
     /* Pending futures */
     futures: HashMap<u64, FutureHolder>,
     /* List of tasks that need polling */
@@ -34,6 +34,18 @@ impl State {
         let id = inner.task_id;
         inner.task_id += 1;
         id
+    }
+
+    fn register_main_task(&self, id: u64) {
+        self.0.lock().main_tasks.insert(id);
+    }
+
+    fn drop_main_task(&self, id: u64) {
+        self.0.lock().main_tasks.remove(&id);
+    }
+
+    fn main_task_exited(&self, id: u64) -> bool {
+        !self.0.lock().main_tasks.contains(&id)
     }
 
     fn setup<F: Future<Output = ()> + Send + 'static>(&self, future: F) {
@@ -160,7 +172,6 @@ impl Wake for ReceiverWaker {
 /* The actual executor */
 #[derive(Default)]
 struct Executor {
-    main_exited: AtomicBool,
     state: State,
 }
 
@@ -169,6 +180,8 @@ impl Executor {
         self.state.register_thread();
         let (sender, receiver) = async_channel::bounded(1);
         let mut receiver = Receiver::new(&receiver, thread::current());
+        // Just register the waker
+        drop(receiver.poll());
         let main_id = self.state.next_task_id();
         let future = FutureHolder::new(
             main_id,
@@ -178,17 +191,17 @@ impl Executor {
             },
             self.state.clone(),
         );
-        if future.run() {
-            self.main_exited.store(true, Ordering::SeqCst);
+        if !future.run() {
+            self.state.register_main_task(main_id);
         }
         loop {
             while let Some(future) = self.state.next() {
                 let id = future.id;
-                if future.run() && id == main_id {
-                    self.main_exited.store(true, Ordering::SeqCst);
+                if future.run() {
+                    self.state.drop_main_task(id);
                 }
             }
-            if self.main_exited.load(Ordering::SeqCst) {
+            if self.state.main_task_exited(main_id) {
                 if let Poll::Ready(res) = receiver.poll() {
                     self.state.deregister_thread();
                     return res;
