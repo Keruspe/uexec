@@ -28,6 +28,9 @@ impl Future for CountDown {
             if self.0 > 6 {
                 println!("Adding another countdown from thread {:?}", thread);
                 uexec::spawn(CountDown(2));
+            } else if self.0 > 4 {
+                println!("Adding another local countdown from thread {:?}", thread);
+                uexec::spawn_local(CountDown(2));
             }
 
             // Setup out waker to wake the executor after one second

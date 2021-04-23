@@ -69,6 +69,11 @@ impl State {
             .and_then(|id| inner.futures.remove(&id))
     }
 
+    fn with_current_thread(self) -> Self {
+        self.register_thread();
+        self
+    }
+
     fn register_thread(&self) {
         self.0.lock().threads.push(thread::current());
     }
@@ -138,6 +143,20 @@ impl FutureHolder {
     }
 }
 
+/* Unsafe wrapper for faking Send on local futures.
+ * This is safe as we're guaranteed not to actually Send them. */
+struct LocalFuture<F: Future<Output = ()>>(F);
+
+impl<F: Future<Output = ()>> Future for LocalFuture<F> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        unsafe { self.map_unchecked_mut(|this| &mut this.0) }.poll(cx)
+    }
+}
+
+unsafe impl<F: Future<Output = ()>> Send for LocalFuture<F> {}
+
 /* Facility to return data from block_on */
 struct Receiver<'a, T: 'a> {
     recv: Pin<Box<async_channel::Recv<'a, T>>>,
@@ -194,8 +213,8 @@ impl Executor {
         if !future.run() {
             self.state.register_main_task(main_id);
         }
-        loop {
-            while let Some(future) = self.state.next() {
+        STATE.with(|local_state| loop {
+            while let Some(future) = local_state.next().or_else(|| self.state.next()) {
                 let id = future.id;
                 if future.run() {
                     self.state.drop_main_task(id);
@@ -208,7 +227,7 @@ impl Executor {
                 }
             }
             thread::park();
-        }
+        })
     }
 
     fn spawn<F: Future<Output = ()> + Send + 'static>(&self, future: F) {
@@ -216,7 +235,7 @@ impl Executor {
     }
 }
 
-/* Implicit executor for the current thread */
+/* Implicit global Executor */
 static EXECUTOR: Lazy<Executor> = Lazy::new(Executor::default);
 
 pub fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(future: F) -> R {
@@ -229,4 +248,13 @@ pub fn spawn<F: Future<Output = ()> + Send + 'static>(future: F) {
 
 pub fn worker() {
     block_on(future::pending())
+}
+
+/* Implicit State for futures local to this thread */
+thread_local! {
+    static STATE: State = State::default().with_current_thread();
+}
+
+pub fn spawn_local<F: Future<Output = ()> + 'static>(future: F) {
+    STATE.with(|state| state.setup(LocalFuture(future)))
 }
