@@ -2,7 +2,7 @@
 //! # uexec - minimal executor
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     future::Future,
     pin::Pin,
     sync::Arc,
@@ -20,7 +20,7 @@ struct State {
     /* Generate a new id for each task */
     task_id: u64,
     /* The list of "main" block_on tasks */
-    main_tasks: HashSet<u64>,
+    main_tasks: HashMap<u64, Thread>,
     /* Pending futures */
     futures: HashMap<u64, FutureHolder>,
     /* List of tasks that need polling */
@@ -36,11 +36,13 @@ impl State {
     }
 
     fn register_main_task(&mut self, id: u64) {
-        self.main_tasks.insert(id);
+        self.main_tasks.insert(id, thread::current());
     }
 
     fn drop_main_task(&mut self, id: u64) {
-        self.main_tasks.remove(&id);
+        if let Some(thread) = self.main_tasks.remove(&id) {
+            thread.unpark();
+        }
     }
 
     fn register_future(&mut self, future: FutureHolder) {
@@ -237,7 +239,7 @@ impl Executor {
     }
 
     fn main_task_exited(&self, id: u64) -> bool {
-        !self.state.lock().main_tasks.contains(&id)
+        !self.state.lock().main_tasks.contains_key(&id)
     }
 
     fn has_pollable_tasks(&self) -> bool {
