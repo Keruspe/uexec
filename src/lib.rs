@@ -50,6 +50,18 @@ impl State {
         self.pollable.push_back(id);
     }
 
+    fn cancel(&mut self, id: u64) {
+        self.drop_main_task(id);
+        let pollable_len = self.pollable.len();
+        self.pollable.retain(|i| *i != id);
+        if let Some(future) = self.futures.remove(&id) {
+            // Only run the last poll if the future was pollable
+            if self.pollable.len() != pollable_len {
+                future.last_run();
+            }
+        }
+    }
+
     fn next(&mut self) -> Option<FutureHolder> {
         let mut future = None;
         let mut attempts = VecDeque::new();
@@ -106,6 +118,15 @@ impl Wake for MyWaker {
     }
 }
 
+/* Dummy waker */
+struct DummyWaker;
+
+impl Wake for DummyWaker {
+    fn wake(self: Arc<Self>) {}
+}
+
+static DUMMY_WAKER: Lazy<Waker> = Lazy::new(|| Arc::new(DummyWaker).into());
+
 /* Holds the future and its waker */
 struct FutureHolder {
     id: u64,
@@ -138,6 +159,11 @@ impl FutureHolder {
                 false
             }
         }
+    }
+
+    fn last_run(mut self) {
+        let mut cx = Context::from_waker(&*DUMMY_WAKER);
+        let _ = self.future.as_mut().poll(&mut cx);
     }
 }
 
@@ -221,7 +247,7 @@ impl Executor {
     fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(&self, future: F) -> R {
         self.state.lock().register_current_thread();
         let handle = self.spawn(future);
-        let main_id = handle.id();
+        let main_id = handle.id;
         let mut receiver = Receiver::new(handle, thread::current());
         if let Poll::Ready(res) = receiver.poll() {
             return res;
@@ -262,7 +288,11 @@ impl Executor {
             self.state.clone(),
         )
         .run();
-        JoinHandle { id, receiver }
+        JoinHandle {
+            id,
+            receiver,
+            state: self.state.clone(),
+        }
     }
 }
 
@@ -270,11 +300,13 @@ impl Executor {
 pub struct JoinHandle<R> {
     id: u64,
     receiver: async_channel::Receiver<R>,
+    state: Arc<Mutex<State>>,
 }
 
 impl<R> JoinHandle<R> {
-    fn id(&self) -> u64 {
-        self.id
+    pub fn cancel(self) -> Option<R> {
+        self.state.lock().cancel(self.id);
+        self.receiver.try_recv().ok()
     }
 }
 
@@ -290,6 +322,12 @@ impl<R> Future for JoinHandle<R> {
 
 pub struct LocalJoinHandle<R>(JoinHandle<LocalRes<R>>);
 
+impl<R> LocalJoinHandle<R> {
+    pub fn cancel(self) -> Option<R> {
+        self.0.cancel().map(|res| res.0)
+    }
+}
+
 impl<R> Future for LocalJoinHandle<R> {
     type Output = R;
 
@@ -298,7 +336,6 @@ impl<R> Future for LocalJoinHandle<R> {
     }
 }
 
-/* Implicit global Executor */
 /* Implicit global Executor */
 static EXECUTOR: Lazy<Executor> = Lazy::new(Executor::default);
 
