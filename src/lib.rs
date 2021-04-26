@@ -252,7 +252,11 @@ impl Executor {
         !self.state.lock().pollable.is_empty()
     }
 
-    fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(&self, future: F) -> R {
+    fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(
+        &self,
+        future: F,
+        local_executor: &Executor,
+    ) -> R {
         self.state.lock().register_current_thread();
         let handle = self.spawn(future);
         let main_id = handle.id;
@@ -262,7 +266,7 @@ impl Executor {
         } else {
             self.state.lock().register_main_task(main_id);
         }
-        LOCAL_EXECUTOR.with(|local_executor| loop {
+        loop {
             while let Some(future) = self.next(local_executor) {
                 let id = future.id;
                 if future.run() {
@@ -278,7 +282,7 @@ impl Executor {
             if !self.has_pollable_tasks() {
                 thread::park();
             }
-        })
+        }
     }
 
     fn spawn<R: Send + 'static, F: Future<Output = R> + Send + 'static>(
@@ -352,7 +356,7 @@ static EXECUTOR: Lazy<Executor> = Lazy::new(Executor::default);
 
 /// Run a worker that will end once the given future is Ready on the current thread
 pub fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(future: F) -> R {
-    EXECUTOR.block_on(future)
+    LOCAL_EXECUTOR.with(|executor| EXECUTOR.block_on(future, executor))
 }
 
 /// Spawn a Future on the global executor ran by the pool of workers (block_on)
@@ -417,6 +421,5 @@ thread_local! {
 
 /// Spawn a Future on the current thread (thus not requiring it to be Send)
 pub fn spawn_local<R: 'static, F: Future<Output = R> + 'static>(future: F) -> LocalJoinHandle<R> {
-    let executor = LOCAL_EXECUTOR.with(|executor| executor.clone());
-    LocalJoinHandle(executor.spawn(LocalFuture(future)))
+    LOCAL_EXECUTOR.with(|executor| LocalJoinHandle(executor.spawn(LocalFuture(future))))
 }
