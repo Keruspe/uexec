@@ -379,9 +379,11 @@ pub fn spawn_workers(threads: u8) {
     let mut workers = WORKERS.lock();
     for _ in 0..threads {
         let (sender, receiver) = async_channel::bounded(1);
-        let handle = std::thread::spawn(|| block_on(async move {
-            drop(receiver.recv().await);
-        }));
+        let handle = std::thread::spawn(|| {
+            block_on(async move {
+                drop(receiver.recv().await);
+            })
+        });
         workers.push(Worker {
             trigger: sender,
             thread: handle,
