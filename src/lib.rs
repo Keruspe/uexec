@@ -1,3 +1,6 @@
+#![warn(missing_docs, rust_2018_idioms)]
+//! # uexec - minimal executor
+
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::{self, Future},
@@ -179,10 +182,9 @@ impl<R, F: Future<Output = R>> Future for LocalFuture<R, F> {
     }
 }
 
-unsafe impl<R, F: Future<Output = R>> Send for LocalFuture<R, F> {}
-
 struct LocalRes<R>(R);
 
+unsafe impl<R, F: Future<Output = R>> Send for LocalFuture<R, F> {}
 unsafe impl<R> Send for LocalRes<R> {}
 
 /* Facility to return data from block_on */
@@ -294,7 +296,7 @@ impl Executor {
     }
 }
 
-/* Handle for waiting for spawned tasks completion */
+/// Wait for a spawned task to complete or cancel it.
 pub struct JoinHandle<R> {
     id: u64,
     receiver: async_channel::Receiver<R>,
@@ -302,6 +304,7 @@ pub struct JoinHandle<R> {
 }
 
 impl<R> JoinHandle<R> {
+    /// Cancel a spawned task, returning its result if it was finished
     pub fn cancel(self) -> Option<R> {
         self.state.lock().cancel(self.id);
         self.receiver.try_recv().ok()
@@ -318,9 +321,11 @@ impl<R> Future for JoinHandle<R> {
     }
 }
 
+/// Wait for a spawned local task to complete or cancel it.
 pub struct LocalJoinHandle<R>(JoinHandle<LocalRes<R>>);
 
 impl<R> LocalJoinHandle<R> {
+    /// Cancel a spawned local task, returning its result if it was finished
     pub fn cancel(self) -> Option<R> {
         self.0.cancel().map(|res| res.0)
     }
@@ -337,16 +342,19 @@ impl<R> Future for LocalJoinHandle<R> {
 /* Implicit global Executor */
 static EXECUTOR: Lazy<Executor> = Lazy::new(Executor::default);
 
+/// Run a worker that will end once the given future is Ready on the current thread
 pub fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(future: F) -> R {
     EXECUTOR.block_on(future)
 }
 
+/// Spawn a Future on the global executor ran by the pool of workers (block_on)
 pub fn spawn<R: Send + 'static, F: Future<Output = R> + Send + 'static>(
     future: F,
 ) -> JoinHandle<R> {
     EXECUTOR.spawn(future)
 }
 
+/// Run an infite worker on the current thread
 pub fn worker() {
     block_on(future::pending())
 }
@@ -356,6 +364,7 @@ thread_local! {
     static LOCAL_EXECUTOR: Executor = Executor::local();
 }
 
+/// Spawn a Future on the current thread (thus not requiring it to be Send)
 pub fn spawn_local<R: 'static, F: Future<Output = R> + 'static>(future: F) -> LocalJoinHandle<R> {
     let executor = LOCAL_EXECUTOR.with(|executor| executor.clone());
     LocalJoinHandle(executor.spawn(LocalFuture(future)))
