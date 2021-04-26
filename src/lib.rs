@@ -1,5 +1,4 @@
 // TODO: support canceling
-// TODO: use spawn in block_on
 // TODO: merge State and Executor
 
 use std::{
@@ -53,7 +52,10 @@ impl State {
         !self.0.lock().main_tasks.contains(&id)
     }
 
-    fn setup<R: Send + 'static, F: Future<Output = R> + Send + 'static>(&self, future: F) -> JoinHandle<R> {
+    fn setup<R: Send + 'static, F: Future<Output = R> + Send + 'static>(
+        &self,
+        future: F,
+    ) -> JoinHandle<R> {
         let id = self.next_task_id();
         let (sender, receiver) = async_channel::bounded(1);
         FutureHolder::new(
@@ -65,7 +67,7 @@ impl State {
             self.clone(),
         )
         .run();
-        JoinHandle(receiver)
+        JoinHandle { id, receiver }
     }
 
     fn register(&self, future: FutureHolder) {
@@ -179,7 +181,9 @@ impl<R, F: Future<Output = R>> Future for LocalFuture<R, F> {
     type Output = LocalRes<R>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        unsafe { self.map_unchecked_mut(|this| &mut this.0) }.poll(cx).map(LocalRes)
+        unsafe { self.map_unchecked_mut(|this| &mut this.0) }
+            .poll(cx)
+            .map(LocalRes)
     }
 }
 
@@ -190,25 +194,22 @@ pub struct LocalRes<R>(R);
 unsafe impl<R> Send for LocalRes<R> {}
 
 /* Facility to return data from block_on */
-struct Receiver<'a, T: 'a> {
-    recv: Pin<Box<async_channel::Recv<'a, T>>>,
+struct Receiver<T> {
+    handle: JoinHandle<T>,
     waker: Waker,
 }
 
-impl<'a, T: 'a> Receiver<'a, T> {
-    fn new(receiver: &'a async_channel::Receiver<T>, thread: Thread) -> Self {
+impl<T> Receiver<T> {
+    fn new(handle: JoinHandle<T>, thread: Thread) -> Self {
         Self {
-            recv: Box::pin(receiver.recv()),
+            handle,
             waker: Arc::new(ReceiverWaker(thread)).into(),
         }
     }
 
     fn poll(&mut self) -> Poll<T> {
         let mut ctx = Context::from_waker(&self.waker);
-        self.recv
-            .as_mut()
-            .poll(&mut ctx)
-            .map(|res| res.expect("channel not expected to fail"))
+        Pin::new(&mut self.handle).poll(&mut ctx)
     }
 }
 
@@ -229,20 +230,12 @@ struct Executor {
 impl Executor {
     fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(&self, future: F) -> R {
         self.state.register_thread();
-        let (sender, receiver) = async_channel::bounded(1);
-        let mut receiver = Receiver::new(&receiver, thread::current());
-        // Just register the waker
-        drop(receiver.poll());
-        let main_id = self.state.next_task_id();
-        let future = FutureHolder::new(
-            main_id,
-            async move {
-                let res = future.await;
-                drop(sender.send(res).await);
-            },
-            self.state.clone(),
-        );
-        if !future.run() {
+        let handle = self.spawn(future);
+        let main_id = handle.id();
+        let mut receiver = Receiver::new(handle, thread::current());
+        if let Poll::Ready(res) = receiver.poll() {
+            return res;
+        } else {
             self.state.register_main_task(main_id);
         }
         STATE.with(|local_state| loop {
@@ -264,19 +257,33 @@ impl Executor {
         })
     }
 
-    fn spawn<R: Send + 'static, F: Future<Output = R> + Send + 'static>(&self, future: F) -> JoinHandle<R> {
+    fn spawn<R: Send + 'static, F: Future<Output = R> + Send + 'static>(
+        &self,
+        future: F,
+    ) -> JoinHandle<R> {
         self.state.setup(future)
     }
 }
 
 /* Handle for waiting for spawned tasks completion */
-pub struct JoinHandle<R>(async_channel::Receiver<R>);
+pub struct JoinHandle<R> {
+    id: u64,
+    receiver: async_channel::Receiver<R>,
+}
+
+impl<R> JoinHandle<R> {
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
 
 impl<R> Future for JoinHandle<R> {
     type Output = R;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.0).poll_next(cx).map(|res| res.expect("inner channel isn't expected to fail"))
+        Pin::new(&mut self.receiver)
+            .poll_next(cx)
+            .map(|res| res.expect("inner channel isn't expected to fail"))
     }
 }
 
@@ -298,7 +305,9 @@ pub fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(futur
     EXECUTOR.block_on(future)
 }
 
-pub fn spawn<R: Send + 'static, F: Future<Output = R> + Send + 'static>(future: F) -> JoinHandle<R> {
+pub fn spawn<R: Send + 'static, F: Future<Output = R> + Send + 'static>(
+    future: F,
+) -> JoinHandle<R> {
     EXECUTOR.spawn(future)
 }
 
