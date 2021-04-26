@@ -1,4 +1,3 @@
-// TODO: support Output in spawn
 // TODO: support canceling
 // TODO: use spawn in block_on
 // TODO: merge State and Executor
@@ -54,14 +53,14 @@ impl State {
         !self.0.lock().main_tasks.contains(&id)
     }
 
-    fn setup<F: Future<Output = ()> + Send + 'static>(&self, future: F) -> JoinHandle {
+    fn setup<R: Send + 'static, F: Future<Output = R> + Send + 'static>(&self, future: F) -> JoinHandle<R> {
         let id = self.next_task_id();
         let (sender, receiver) = async_channel::bounded(1);
         FutureHolder::new(
             id,
             async move {
-                future.await;
-                drop(sender.send(()).await);
+                let res = future.await;
+                drop(sender.send(res).await);
             },
             self.clone(),
         )
@@ -174,17 +173,21 @@ impl FutureHolder {
 
 /* Unsafe wrapper for faking Send on local futures.
  * This is safe as we're guaranteed not to actually Send them. */
-struct LocalFuture<F: Future<Output = ()>>(F);
+struct LocalFuture<R, F: Future<Output = R>>(F);
 
-impl<F: Future<Output = ()>> Future for LocalFuture<F> {
-    type Output = ();
+impl<R, F: Future<Output = R>> Future for LocalFuture<R, F> {
+    type Output = LocalRes<R>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        unsafe { self.map_unchecked_mut(|this| &mut this.0) }.poll(cx)
+        unsafe { self.map_unchecked_mut(|this| &mut this.0) }.poll(cx).map(LocalRes)
     }
 }
 
-unsafe impl<F: Future<Output = ()>> Send for LocalFuture<F> {}
+unsafe impl<R, F: Future<Output = R>> Send for LocalFuture<R, F> {}
+
+pub struct LocalRes<R>(R);
+
+unsafe impl<R> Send for LocalRes<R> {}
 
 /* Facility to return data from block_on */
 struct Receiver<'a, T: 'a> {
@@ -261,22 +264,33 @@ impl Executor {
         })
     }
 
-    fn spawn<F: Future<Output = ()> + Send + 'static>(&self, future: F) -> JoinHandle {
+    fn spawn<R: Send + 'static, F: Future<Output = R> + Send + 'static>(&self, future: F) -> JoinHandle<R> {
         self.state.setup(future)
     }
 }
 
 /* Handle for waiting for spawned tasks completion */
-pub struct JoinHandle(async_channel::Receiver<()>);
+pub struct JoinHandle<R>(async_channel::Receiver<R>);
 
-impl Future for JoinHandle {
-    type Output = ();
+impl<R> Future for JoinHandle<R> {
+    type Output = R;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        Pin::new(&mut self.0).poll_next(cx).map(drop)
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll_next(cx).map(|res| res.expect("inner channel isn't expected to fail"))
     }
 }
 
+pub struct LocalJoinHandle<R>(JoinHandle<LocalRes<R>>);
+
+impl<R> Future for LocalJoinHandle<R> {
+    type Output = R;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(cx).map(|res| res.0)
+    }
+}
+
+/* Implicit global Executor */
 /* Implicit global Executor */
 static EXECUTOR: Lazy<Executor> = Lazy::new(Executor::default);
 
@@ -284,7 +298,7 @@ pub fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(futur
     EXECUTOR.block_on(future)
 }
 
-pub fn spawn<F: Future<Output = ()> + Send + 'static>(future: F) -> JoinHandle {
+pub fn spawn<R: Send + 'static, F: Future<Output = R> + Send + 'static>(future: F) -> JoinHandle<R> {
     EXECUTOR.spawn(future)
 }
 
@@ -297,7 +311,7 @@ thread_local! {
     static STATE: State = State::default().with_current_thread();
 }
 
-pub fn spawn_local<F: Future<Output = ()> + 'static>(future: F) -> JoinHandle {
+pub fn spawn_local<R: 'static, F: Future<Output = R> + 'static>(future: F) -> LocalJoinHandle<R> {
     let state = STATE.with(|state| state.clone());
-    state.setup(LocalFuture(future))
+    LocalJoinHandle(state.setup(LocalFuture(future)))
 }
