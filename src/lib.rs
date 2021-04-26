@@ -49,15 +49,21 @@ impl State {
         self.futures.insert(future.id, future);
     }
 
+    fn drop_future(&mut self, id: u64) -> Option<FutureHolder> {
+        self.pollable.retain(|i| *i != id);
+        self.futures.remove(&id)
+    }
+
     fn register_pollable(&mut self, id: u64) {
-        self.pollable.push_back(id);
+        if !self.pollable.contains(&id) {
+            self.pollable.push_back(id);
+        }
     }
 
     fn cancel(&mut self, id: u64) {
         self.drop_main_task(id);
         let pollable_len = self.pollable.len();
-        self.pollable.retain(|i| *i != id);
-        if let Some(future) = self.futures.remove(&id) {
+        if let Some(future) = self.drop_future(id) {
             // Only run the last poll if the future was pollable
             if self.pollable.len() != pollable_len {
                 future.last_run();
@@ -69,7 +75,7 @@ impl State {
         let mut future = None;
         let mut attempts = VecDeque::new();
         while let Some(id) = self.pollable.pop_front() {
-            future = self.futures.remove(&id);
+            future = self.drop_future(id);
             if future.is_some() {
                 break;
             }
