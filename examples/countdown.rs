@@ -54,5 +54,7 @@ fn main() {
         }
     });
 
+    println!("Terminating workers");
     uexec::terminate_workers();
+    println!("Goodbye!");
 }
