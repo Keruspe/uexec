@@ -1,5 +1,3 @@
-// TODO: support canceling
-
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::{self, Future},
@@ -183,7 +181,7 @@ impl<R, F: Future<Output = R>> Future for LocalFuture<R, F> {
 
 unsafe impl<R, F: Future<Output = R>> Send for LocalFuture<R, F> {}
 
-pub struct LocalRes<R>(R);
+struct LocalRes<R>(R);
 
 unsafe impl<R> Send for LocalRes<R> {}
 
