@@ -3,7 +3,7 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    future::{self, Future},
+    future::Future,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll, Wake, Waker},
@@ -354,9 +354,50 @@ pub fn spawn<R: Send + 'static, F: Future<Output = R> + Send + 'static>(
     EXECUTOR.spawn(future)
 }
 
-/// Run an infite worker on the current thread
-pub fn worker() {
-    block_on(future::pending())
+/* Control the pool of workers */
+struct Worker {
+    trigger: async_channel::Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Worker {
+    fn trigger_termination(&self) {
+        drop(self.trigger.try_send(()));
+    }
+
+    fn terminate(self) {
+        if let Err(err) = self.thread.join() {
+            std::panic::resume_unwind(err);
+        }
+    }
+}
+
+static WORKERS: Lazy<Mutex<Vec<Worker>>> = Lazy::new(Default::default);
+
+/// Run new worker threads
+pub fn spawn_workers(threads: u8) {
+    let mut workers = WORKERS.lock();
+    for _ in 0..threads {
+        let (sender, receiver) = async_channel::bounded(1);
+        let handle = std::thread::spawn(|| block_on(async move {
+            drop(receiver.recv().await);
+        }));
+        workers.push(Worker {
+            trigger: sender,
+            thread: handle,
+        });
+    }
+}
+
+/// Terminate all worker threads
+pub fn terminate_workers() {
+    let mut workers = WORKERS.lock();
+    for worker in workers.iter() {
+        worker.trigger_termination();
+    }
+    for worker in workers.drain(..) {
+        worker.terminate();
+    }
 }
 
 /* Implicit State for futures local to this thread */

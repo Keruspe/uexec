@@ -41,9 +41,7 @@ impl Future for CountDown {
 
 fn main() {
     // Run a thread pool of executors
-    for _ in 0..THREADS {
-        std::thread::spawn(|| uexec::worker());
-    }
+    uexec::spawn_workers(THREADS);
 
     assert_eq!(uexec::block_on(async { 3 + 1 }), 4);
     uexec::block_on(async {
@@ -55,4 +53,6 @@ fn main() {
             task.await;
         }
     });
+
+    uexec::terminate_workers();
 }
