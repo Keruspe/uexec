@@ -43,7 +43,6 @@ fn main() {
     // Run a thread pool of executors
     uexec::spawn_workers(THREADS);
 
-    assert_eq!(uexec::block_on(async { 3 + 1 }), 4);
     uexec::block_on(async {
         let tasks: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![
             Box::pin(CountDown(5)),
