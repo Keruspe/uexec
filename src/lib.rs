@@ -272,8 +272,7 @@ impl Executor {
         let main_id = handle.id;
         let mut receiver = Receiver::new(handle, parker.unparker());
         self.state.lock().register_main_task(main_id, parker.unparker());
-        if let Poll::Ready(res) = receiver.poll() {
-            self.state.lock().deregister_current_thread();
+        if let Some(res) = self.poll_receiver(&mut receiver) {
             self.state.lock().drop_main_task(main_id);
             return res;
         }
@@ -285,14 +284,22 @@ impl Executor {
                 }
             }
             if self.main_task_exited(main_id) {
-                if let Poll::Ready(res) = receiver.poll() {
-                    self.state.lock().deregister_current_thread();
+                if let Some(res) = self.poll_receiver(&mut receiver) {
                     return res;
                 }
             }
             if !self.has_pollable_tasks() {
                 parker.park();
             }
+        }
+    }
+
+    fn poll_receiver<R>(&self, receiver: &mut Receiver<R>) -> Option<R> {
+        if let Poll::Ready(res) = receiver.poll() {
+            self.state.lock().deregister_current_thread();
+            Some(res)
+        } else {
+            None
         }
     }
 
