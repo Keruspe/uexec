@@ -5,7 +5,7 @@ use std::{
     collections::{HashMap, VecDeque},
     future::Future,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, atomic::{AtomicU64, Ordering}},
     task::{Context, Poll, Wake, Waker},
     thread::{self, ThreadId},
 };
@@ -18,8 +18,6 @@ use parking_lot::Mutex;
 /* The common state containing all the futures */
 #[derive(Default)]
 struct State {
-    /* Generate a new id for each task */
-    task_id: u64,
     /* The list of "main" block_on tasks */
     main_tasks: HashMap<u64, Unparker>,
     /* Pending futures */
@@ -31,11 +29,6 @@ struct State {
 }
 
 impl State {
-    fn next_task_id(&mut self) -> u64 {
-        self.task_id += 1;
-        self.task_id
-    }
-
     fn register_main_task(&mut self, id: u64, unparker: Unparker) {
         self.main_tasks.insert(id, unparker);
     }
@@ -307,7 +300,7 @@ impl Executor {
         &self,
         future: F,
     ) -> JoinHandle<R> {
-        let id = self.state.lock().next_task_id();
+        let id = TASK_ID.fetch_add(1, Ordering::SeqCst);
         let (sender, receiver) = async_channel::bounded(1);
         FutureHolder::new(
             id,
@@ -368,6 +361,9 @@ impl<R> Future for LocalJoinHandle<R> {
         Pin::new(&mut self.0).poll(cx).map(|res| res.0)
     }
 }
+
+/* Generate a new id for each task */
+static TASK_ID: AtomicU64 = AtomicU64::new(1);
 
 /* Implicit global Executor */
 static EXECUTOR: Lazy<Executor> = Lazy::new(Executor::default);
