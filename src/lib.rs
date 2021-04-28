@@ -399,7 +399,7 @@ struct Worker {
 
 impl Worker {
     fn trigger_termination(&self) {
-        drop(self.trigger.try_send(()));
+        let _ = self.trigger.try_send(());
     }
 
     fn terminate(self) {
@@ -418,7 +418,7 @@ pub fn spawn_workers(threads: u8) {
         let (sender, receiver) = async_channel::bounded(1);
         let handle = std::thread::spawn(|| {
             block_on(async move {
-                drop(receiver.recv().await);
+                let _ = receiver.recv().await;
             })
         });
         workers.push(Worker {
