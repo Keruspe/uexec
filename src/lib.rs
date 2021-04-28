@@ -5,7 +5,10 @@ use std::{
     collections::{HashMap, VecDeque},
     future::Future,
     pin::Pin,
-    sync::{Arc, atomic::{AtomicU64, Ordering}},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     task::{Context, Poll, Wake, Waker},
     thread::{self, ThreadId},
 };
@@ -98,7 +101,12 @@ impl State {
     fn unpark_random_thread(&self) {
         if !self.threads.is_empty() {
             let i = fastrand::usize(..self.threads.len());
-            for thread in self.threads.values().skip(i).chain(self.threads.values().take(i)) {
+            for thread in self
+                .threads
+                .values()
+                .skip(i)
+                .chain(self.threads.values().take(i))
+            {
                 if thread.unpark() {
                     return;
                 }
@@ -231,11 +239,11 @@ struct Executor {
 
 impl Executor {
     fn local() -> Self {
-        PARKER.with(|parker|
-            Self {
-                state: Arc::new(Mutex::new(State::default().with_current_thread(parker.unparker()))),
-            }
-        )
+        PARKER.with(|parker| Self {
+            state: Arc::new(Mutex::new(
+                State::default().with_current_thread(parker.unparker()),
+            )),
+        })
     }
 
     fn next(&self, local_executor: &Executor) -> Option<FutureHolder> {
@@ -264,7 +272,9 @@ impl Executor {
         let handle = self.spawn(future);
         let main_id = handle.id;
         let mut receiver = Receiver::new(handle, parker.unparker());
-        self.state.lock().register_main_task(main_id, parker.unparker());
+        self.state
+            .lock()
+            .register_main_task(main_id, parker.unparker());
         if let Some(res) = self.poll_receiver(&mut receiver) {
             self.state.lock().drop_main_task(main_id);
             return res;
@@ -370,7 +380,8 @@ static EXECUTOR: Lazy<Executor> = Lazy::new(Executor::default);
 
 /// Run a worker that will end once the given future is Ready on the current thread
 pub fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(future: F) -> R {
-    PARKER.with(|parker| LOCAL_EXECUTOR.with(|executor| EXECUTOR.block_on(future, parker, executor)))
+    PARKER
+        .with(|parker| LOCAL_EXECUTOR.with(|executor| EXECUTOR.block_on(future, parker, executor)))
 }
 
 /// Spawn a Future on the global executor ran by the pool of workers (block_on)
