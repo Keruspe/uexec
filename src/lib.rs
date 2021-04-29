@@ -6,7 +6,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     task::{Context, Poll, Wake, Waker},
@@ -28,30 +28,6 @@ static WORKERS: Lazy<Mutex<Vec<Worker>>> = Lazy::new(Default::default);
 thread_local! {
     static PARKER: Parker = Parker::new();
     static LOCAL_EXECUTOR: Executor = Executor::local();
-}
-
-/* The list of "main" block_on tasks */
-#[derive(Clone, Default)]
-struct MainTasks(Arc<Mutex<HashMap<u64, Unparker>>>);
-
-impl MainTasks {
-    fn register(&self, id: u64, unparker: Unparker) {
-        self.0.lock().insert(id, unparker);
-    }
-
-    fn contains(&self, id: u64) -> bool {
-        self.0.lock().contains_key(&id)
-    }
-
-    fn remove(&self, id: u64) -> Option<Unparker> {
-        self.0.lock().remove(&id)
-    }
-
-    fn drop(&self, id: u64) {
-        if let Some(thread) = self.remove(id) {
-            thread.unpark();
-        }
-    }
 }
 
 /* List of active threads */
@@ -163,6 +139,26 @@ impl State {
     }
 }
 
+/* Context to properly exit block_on once the main task has exited */
+struct MainTaskContext {
+    exited: Arc<AtomicBool>,
+    unparker: Unparker,
+}
+
+impl MainTaskContext {
+    fn new(unparker: Unparker) -> Self {
+        Self {
+            exited: Arc::new(AtomicBool::new(false)),
+            unparker,
+        }
+    }
+
+    fn exit(&self) {
+        self.exited.store(true, Ordering::Release);
+        self.unparker.unpark();
+    }
+}
+
 /* Wake the executor after registering us in the list of tasks that need polling */
 struct MyWaker {
     id: u64,
@@ -197,6 +193,7 @@ struct FutureHolder {
     threads: Threads,
     state: State,
     waker: Waker,
+    main_task: Option<MainTaskContext>,
 }
 
 impl FutureHolder {
@@ -205,6 +202,7 @@ impl FutureHolder {
         future: F,
         threads: Threads,
         state: State,
+        main_task: Option<MainTaskContext>,
     ) -> Self {
         let waker = Arc::new(MyWaker::new(id, threads.clone(), state.clone()));
         Self {
@@ -213,17 +211,21 @@ impl FutureHolder {
             threads,
             state,
             waker: waker.into(),
+            main_task,
         }
     }
 
-    fn run(mut self) -> bool {
+    fn run(mut self) {
         let mut ctx = Context::from_waker(&self.waker);
         match self.future.as_mut().poll(&mut ctx) {
-            Poll::Ready(()) => true,
+            Poll::Ready(()) => {
+                if let Some(main_task) = self.main_task {
+                    main_task.exit();
+                }
+            }
             Poll::Pending => {
                 let threads = self.threads.clone();
                 self.state.clone().register_future(self, threads);
-                false
             }
         }
     }
@@ -232,6 +234,9 @@ impl FutureHolder {
         static DUMMY_WAKER: Lazy<Waker> = Lazy::new(|| Arc::new(DummyWaker).into());
         let mut cx = Context::from_waker(&*DUMMY_WAKER);
         let _ = self.future.as_mut().poll(&mut cx);
+        if let Some(main_task) = self.main_task {
+            main_task.exit();
+        }
     }
 }
 
@@ -286,21 +291,22 @@ impl Wake for ReceiverWaker {
 struct Executor {
     /* Generate a new id for each task */
     task_id: Arc<AtomicU64>,
-    main_tasks: MainTasks,
     threads: Threads,
     state: State,
 }
 
 enum SetupResult<R> {
     Ok(R),
-    Pending { main_id: u64, receiver: Receiver<R> },
+    Pending {
+        receiver: Receiver<R>,
+        main_task_exited: Arc<AtomicBool>,
+    },
 }
 
 impl Executor {
     fn local() -> Self {
         PARKER.with(|parker| Self {
             task_id: Arc::new(AtomicU64::new(1)),
-            main_tasks: Default::default(),
             threads: Threads::default().with_current(parker.unparker()),
             state: Default::default(),
         })
@@ -314,14 +320,13 @@ impl Executor {
         local_executor.state.next().or_else(|| self.state.next())
     }
 
-    fn main_task_exited(&self, id: u64) -> bool {
-        !self.main_tasks.contains(id)
-    }
-
     fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(&self, future: F) -> R {
         PARKER.with(|parker| match self.setup(future, parker) {
             SetupResult::Ok(res) => res,
-            SetupResult::Pending { main_id, receiver } => self.run(main_id, receiver, parker),
+            SetupResult::Pending {
+                receiver,
+                main_task_exited,
+            } => self.run(receiver, main_task_exited, parker),
         })
     }
 
@@ -331,32 +336,31 @@ impl Executor {
         parker: &Parker,
     ) -> SetupResult<R> {
         self.threads.register_current(parker.unparker());
-        let handle = self.spawn(future);
-        let main_id = handle.id;
+        let main_task = MainTaskContext::new(parker.unparker());
+        let main_task_exited = main_task.exited.clone();
+        let handle = self._spawn(future, Some(main_task));
         let mut receiver = Receiver::new(handle, parker.unparker());
-        self.main_tasks.register(main_id, parker.unparker());
         if let Some(res) = self.poll_receiver(&mut receiver) {
-            self.main_tasks.drop(main_id);
             SetupResult::Ok(res)
         } else {
-            SetupResult::Pending { main_id, receiver }
+            SetupResult::Pending {
+                receiver,
+                main_task_exited,
+            }
         }
     }
 
     fn run<R: Send + 'static>(
         &self,
-        main_id: u64,
         mut receiver: Receiver<R>,
+        main_task_exited: Arc<AtomicBool>,
         parker: &Parker,
     ) -> R {
         LOCAL_EXECUTOR.with(|local_executor| loop {
             while let Some(future) = self.next(local_executor) {
-                let id = future.id;
-                if future.run() {
-                    self.main_tasks.drop(id);
-                }
+                future.run();
             }
-            if self.main_task_exited(main_id) {
+            if main_task_exited.load(Ordering::Acquire) {
                 if let Some(res) = self.poll_receiver(&mut receiver) {
                     return res;
                 }
@@ -380,6 +384,14 @@ impl Executor {
         &self,
         future: F,
     ) -> JoinHandle<R> {
+        self._spawn(future, None)
+    }
+
+    fn _spawn<R: Send + 'static, F: Future<Output = R> + Send + 'static>(
+        &self,
+        future: F,
+        main_task: Option<MainTaskContext>,
+    ) -> JoinHandle<R> {
         let id = self.next_task_id();
         let (sender, receiver) = async_channel::bounded(1);
         FutureHolder::new(
@@ -390,12 +402,12 @@ impl Executor {
             },
             self.threads.clone(),
             self.state.clone(),
+            main_task,
         )
         .run();
         JoinHandle {
             id,
             receiver,
-            main_tasks: self.main_tasks.clone(),
             state: self.state.clone(),
         }
     }
@@ -405,14 +417,12 @@ impl Executor {
 pub struct JoinHandle<R> {
     id: u64,
     receiver: async_channel::Receiver<R>,
-    main_tasks: MainTasks,
     state: State,
 }
 
 impl<R> JoinHandle<R> {
     /// Cancel a spawned task, returning its result if it was finished
     pub fn cancel(self) -> Option<R> {
-        self.main_tasks.drop(self.id);
         self.state.cancel(self.id);
         self.receiver.try_recv().ok()
     }
