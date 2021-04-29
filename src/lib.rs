@@ -19,7 +19,7 @@ use parking::{Parker, Unparker};
 use parking_lot::{Mutex, RwLock};
 
 /* Implicit global Executor */
-static EXECUTOR: Lazy<Executor> = Lazy::new(Executor::default);
+static EXECUTOR: Lazy<Executor> = Lazy::new(Default::default);
 
 /* List of wokers we spawned */
 static WORKERS: Lazy<Mutex<Vec<Worker>>> = Lazy::new(Default::default);
@@ -294,7 +294,7 @@ impl Executor {
     }
 
     fn next_task_id(&self) -> u64 {
-        self.task_id.fetch_add(1, Ordering::SeqCst)
+        self.task_id.fetch_add(1, Ordering::Relaxed)
     }
 
     fn next(&self, local_executor: &Executor) -> Option<FutureHolder> {
