@@ -22,7 +22,7 @@ use parking_lot::{Mutex, RwLock};
 static EXECUTOR: Lazy<Executor> = Lazy::new(Default::default);
 
 /* List of wokers we spawned */
-static WORKERS: Lazy<Mutex<Vec<Worker>>> = Lazy::new(Default::default);
+static WORKERS: Lazy<Workers> = Lazy::new(Default::default);
 
 /* Implicit State for futures local to this thread */
 thread_local! {
@@ -469,6 +469,37 @@ pub fn spawn<R: Send + 'static, F: Future<Output = R> + Send + 'static>(
 }
 
 /* Control the pool of workers */
+#[derive(Default)]
+struct Workers(Mutex<Vec<Worker>>);
+
+impl Workers {
+    fn spawn(&self, threads: u8) {
+        let mut workers = self.0.lock();
+        for _ in 0..threads {
+            let (sender, receiver) = async_channel::bounded(1);
+            let handle = std::thread::spawn(|| {
+                block_on(async move {
+                    let _ = receiver.recv().await;
+                })
+            });
+            workers.push(Worker {
+                trigger: sender,
+                thread: handle,
+            });
+        }
+    }
+
+    fn terminate(&self) {
+        let mut workers = self.0.lock();
+        for worker in workers.iter() {
+            worker.trigger_termination();
+        }
+        for worker in workers.drain(..) {
+            worker.terminate();
+        }
+    }
+}
+
 struct Worker {
     trigger: async_channel::Sender<()>,
     thread: std::thread::JoinHandle<()>,
@@ -488,30 +519,12 @@ impl Worker {
 
 /// Run new worker threads
 pub fn spawn_workers(threads: u8) {
-    let mut workers = WORKERS.lock();
-    for _ in 0..threads {
-        let (sender, receiver) = async_channel::bounded(1);
-        let handle = std::thread::spawn(|| {
-            block_on(async move {
-                let _ = receiver.recv().await;
-            })
-        });
-        workers.push(Worker {
-            trigger: sender,
-            thread: handle,
-        });
-    }
+    WORKERS.spawn(threads);
 }
 
 /// Terminate all worker threads
 pub fn terminate_workers() {
-    let mut workers = WORKERS.lock();
-    for worker in workers.iter() {
-        worker.trigger_termination();
-    }
-    for worker in workers.drain(..) {
-        worker.terminate();
-    }
+    WORKERS.terminate();
 }
 
 /// Spawn a Future on the current thread (thus not requiring it to be Send)
