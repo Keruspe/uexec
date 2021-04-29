@@ -266,6 +266,11 @@ struct Executor {
     state: State,
 }
 
+enum SetupResult<R> {
+    Ok(R),
+    Pending { main_id: u64, receiver: Receiver<R> },
+}
+
 impl Executor {
     fn local() -> Self {
         PARKER.with(|parker| Self {
@@ -283,12 +288,19 @@ impl Executor {
         !self.main_tasks.contains(id)
     }
 
-    fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(
+    fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(&self, future: F) -> R {
+        PARKER.with(|parker| match self.setup(future, parker) {
+            SetupResult::Ok(res) => res,
+            SetupResult::Pending { main_id, receiver } => LOCAL_EXECUTOR
+                .with(|local_executor| self.run(main_id, receiver, parker, local_executor)),
+        })
+    }
+
+    fn setup<R: Send + 'static, F: Future<Output = R> + Send + 'static>(
         &self,
         future: F,
         parker: &Parker,
-        local_executor: &Executor,
-    ) -> R {
+    ) -> SetupResult<R> {
         self.threads.register_current(parker.unparker());
         let handle = self.spawn(future);
         let main_id = handle.id;
@@ -296,8 +308,19 @@ impl Executor {
         self.main_tasks.register(main_id, parker.unparker());
         if let Some(res) = self.poll_receiver(&mut receiver) {
             self.main_tasks.drop(main_id);
-            return res;
+            SetupResult::Ok(res)
+        } else {
+            SetupResult::Pending { main_id, receiver }
         }
+    }
+
+    fn run<R: Send + 'static>(
+        &self,
+        main_id: u64,
+        mut receiver: Receiver<R>,
+        parker: &Parker,
+        local_executor: &Executor,
+    ) -> R {
         loop {
             while let Some(future) = self.next(local_executor) {
                 let id = future.id;
@@ -403,8 +426,7 @@ static EXECUTOR: Lazy<Executor> = Lazy::new(Executor::default);
 
 /// Run a worker that will end once the given future is Ready on the current thread
 pub fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(future: F) -> R {
-    PARKER
-        .with(|parker| LOCAL_EXECUTOR.with(|executor| EXECUTOR.block_on(future, parker, executor)))
+    EXECUTOR.block_on(future)
 }
 
 /// Spawn a Future on the global executor ran by the pool of workers (block_on)
