@@ -16,7 +16,7 @@ use std::{
 use futures_core::Stream;
 use once_cell::sync::Lazy;
 use parking::{Parker, Unparker};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 
 /* The list of "main" block_on tasks */
 #[derive(Clone, Default)]
@@ -42,6 +42,42 @@ impl MainTasks {
     }
 }
 
+/* List of active threads */
+#[derive(Clone, Default)]
+struct Threads(Arc<RwLock<HashMap<ThreadId, Unparker>>>);
+
+impl Threads {
+    fn register_current(&self, unparker: Unparker) {
+        self.0.write().insert(thread::current().id(), unparker);
+    }
+
+    fn with_current(self, unparker: Unparker) -> Self {
+        self.register_current(unparker);
+        self
+    }
+
+    fn deregister_current(&self) {
+        self.0.write().remove(&thread::current().id());
+        self.unpark_random_thread();
+    }
+
+    fn unpark_random_thread(&self) {
+        let threads = self.0.read();
+        if !threads.is_empty() {
+            let i = fastrand::usize(..threads.len());
+            for thread in threads
+                .values()
+                .skip(i)
+                .chain(threads.values().take(i))
+            {
+                if thread.unpark() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /* The common state containing all the futures */
 #[derive(Default)]
 struct State {
@@ -49,8 +85,6 @@ struct State {
     futures: HashMap<u64, FutureHolder>,
     /* List of tasks that need polling */
     pollable: VecDeque<u64>,
-    /* List of active threads */
-    threads: HashMap<ThreadId, Unparker>,
 }
 
 impl State {
@@ -94,55 +128,25 @@ impl State {
         }
         future
     }
-
-    fn register_current_thread(&mut self, unparker: Unparker) {
-        self.threads.insert(thread::current().id(), unparker);
-    }
-
-    fn with_current_thread(mut self, unparker: Unparker) -> Self {
-        self.register_current_thread(unparker);
-        self
-    }
-
-    fn deregister_current_thread(&mut self) {
-        self.threads.remove(&thread::current().id());
-        self.unpark_random_thread();
-    }
-
-    fn unpark_random_thread(&self) {
-        if !self.threads.is_empty() {
-            let i = fastrand::usize(..self.threads.len());
-            for thread in self
-                .threads
-                .values()
-                .skip(i)
-                .chain(self.threads.values().take(i))
-            {
-                if thread.unpark() {
-                    return;
-                }
-            }
-        }
-    }
 }
 
 /* Wake the executor after registering us in the list of tasks that need polling */
 struct MyWaker {
     id: u64,
+    threads: Threads,
     state: Arc<Mutex<State>>,
 }
 
 impl MyWaker {
-    fn new(id: u64, state: Arc<Mutex<State>>) -> Self {
-        Self { id, state }
+    fn new(id: u64, threads: Threads, state: Arc<Mutex<State>>) -> Self {
+        Self { id, threads, state }
     }
 }
 
 impl Wake for MyWaker {
     fn wake(self: Arc<Self>) {
-        let mut state = self.state.lock();
-        state.register_pollable(self.id);
-        state.unpark_random_thread();
+        self.state.lock().register_pollable(self.id);
+        self.threads.unpark_random_thread();
     }
 }
 
@@ -167,9 +171,10 @@ impl FutureHolder {
     fn new<F: Future<Output = ()> + Send + 'static>(
         id: u64,
         future: F,
+        threads: Threads,
         state: Arc<Mutex<State>>,
     ) -> Self {
-        let waker = Arc::new(MyWaker::new(id, state.clone()));
+        let waker = Arc::new(MyWaker::new(id, threads, state.clone()));
         Self {
             id,
             state,
@@ -246,6 +251,7 @@ impl Wake for ReceiverWaker {
 #[derive(Clone, Default)]
 struct Executor {
     main_tasks: MainTasks,
+    threads: Threads,
     state: Arc<Mutex<State>>,
 }
 
@@ -253,9 +259,8 @@ impl Executor {
     fn local() -> Self {
         PARKER.with(|parker| Self {
             main_tasks: Default::default(),
-            state: Arc::new(Mutex::new(
-                State::default().with_current_thread(parker.unparker()),
-            )),
+            threads: Threads::default().with_current(parker.unparker()),
+            state: Default::default(),
         })
     }
 
@@ -281,7 +286,7 @@ impl Executor {
         parker: &Parker,
         local_executor: &Executor,
     ) -> R {
-        self.state.lock().register_current_thread(parker.unparker());
+        self.threads.register_current(parker.unparker());
         let handle = self.spawn(future);
         let main_id = handle.id;
         let mut receiver = Receiver::new(handle, parker.unparker());
@@ -310,7 +315,7 @@ impl Executor {
 
     fn poll_receiver<R>(&self, receiver: &mut Receiver<R>) -> Option<R> {
         if let Poll::Ready(res) = receiver.poll() {
-            self.state.lock().deregister_current_thread();
+            self.threads.deregister_current();
             Some(res)
         } else {
             None
@@ -329,6 +334,7 @@ impl Executor {
                 let res = future.await;
                 drop(sender.send(res).await);
             },
+            self.threads.clone(),
             self.state.clone(),
         )
         .run();
