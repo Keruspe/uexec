@@ -260,14 +260,14 @@ unsafe impl<R> Send for LocalRes<R> {}
 
 /* Facility to return data from block_on */
 struct Receiver<T> {
-    handle: JoinHandle<T>,
+    handle: LocalJoinHandle<T>,
     waker: Waker,
 }
 
 impl<T> Receiver<T> {
-    fn new(handle: JoinHandle<T>, thread: Unparker) -> Self {
+    fn new(handle: JoinHandle<LocalRes<T>>, thread: Unparker) -> Self {
         Self {
-            handle,
+            handle: LocalJoinHandle(handle),
             waker: Arc::new(ReceiverWaker(thread)).into(),
         }
     }
@@ -320,7 +320,7 @@ impl Executor {
         local_executor.state.next().or_else(|| self.state.next())
     }
 
-    fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(&self, future: F) -> R {
+    fn block_on<R: 'static, F: Future<Output = R> + 'static>(&self, future: F) -> R {
         LOCAL_EXECUTOR.with(|local_executor| {
             PARKER.with(|parker| match self.setup(future, local_executor, parker) {
                 SetupResult::Ok(res) => res,
@@ -332,7 +332,7 @@ impl Executor {
         })
     }
 
-    fn setup<R: Send + 'static, F: Future<Output = R> + Send + 'static>(
+    fn setup<R: 'static, F: Future<Output = R> + 'static>(
         &self,
         future: F,
         local_executor: &Executor,
@@ -341,7 +341,7 @@ impl Executor {
         self.threads.register_current(parker.unparker());
         let main_task = MainTaskContext::new(parker.unparker());
         let main_task_exited = main_task.exited.clone();
-        let handle = local_executor._spawn(future, Some(main_task));
+        let handle = local_executor._spawn(LocalFuture(future), Some(main_task));
         let mut receiver = Receiver::new(handle, parker.unparker());
         if let Some(res) = self.poll_receiver(&mut receiver) {
             SetupResult::Ok(res)
@@ -353,7 +353,7 @@ impl Executor {
         }
     }
 
-    fn run<R: Send + 'static>(
+    fn run<R: 'static>(
         &self,
         mut receiver: Receiver<R>,
         main_task_exited: Arc<AtomicBool>,
@@ -461,7 +461,7 @@ impl<R> Future for LocalJoinHandle<R> {
 }
 
 /// Run a worker that will end once the given future is Ready on the current thread
-pub fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(future: F) -> R {
+pub fn block_on<R: 'static, F: Future<Output = R> + 'static>(future: F) -> R {
     EXECUTOR.block_on(future)
 }
 
