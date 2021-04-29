@@ -83,10 +83,10 @@ impl Threads {
 
     fn deregister_current(&self) {
         self.deregister(thread::current().id());
-        self.unpark_random_thread();
+        self.unpark_random();
     }
 
-    fn unpark_random_thread(&self) {
+    fn unpark_random(&self) {
         let threads = self.0.read();
         if !threads.is_empty() {
             let i = fastrand::usize(..threads.len());
@@ -118,7 +118,7 @@ impl State {
         let mut futures = self.0.lock();
         if futures.pollable_next.remove(&future.id) {
             futures.pollable.push_back(future);
-            threads.unpark_random_thread();
+            threads.unpark_random();
         } else {
             futures.pending.insert(future.id, future);
         }
@@ -179,7 +179,7 @@ impl MyWaker {
 impl Wake for MyWaker {
     fn wake(self: Arc<Self>) {
         self.state.register_pollable(self.id);
-        self.threads.unpark_random_thread();
+        self.threads.unpark_random();
     }
 }
 
