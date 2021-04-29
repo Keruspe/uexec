@@ -2,7 +2,7 @@
 //! # uexec - minimal executor
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     future::Future,
     pin::Pin,
     sync::{
@@ -65,11 +65,7 @@ impl Threads {
         let threads = self.0.read();
         if !threads.is_empty() {
             let i = fastrand::usize(..threads.len());
-            for thread in threads
-                .values()
-                .skip(i)
-                .chain(threads.values().take(i))
-            {
+            for thread in threads.values().skip(i).chain(threads.values().take(i)) {
                 if thread.unpark() {
                     return;
                 }
@@ -79,54 +75,66 @@ impl Threads {
 }
 
 /* The common state containing all the futures */
+#[derive(Clone, Default)]
+struct State(Arc<Mutex<Futures>>);
+
 #[derive(Default)]
-struct State {
+struct Futures {
     /* Pending futures */
-    futures: HashMap<u64, FutureHolder>,
+    pending: HashMap<u64, FutureHolder>,
     /* List of tasks that need polling */
-    pollable: VecDeque<u64>,
+    pollable: VecDeque<FutureHolder>,
+    /* List of tasks that are already pollable but not yet registered */
+    pollable_next: HashSet<u64>,
 }
 
 impl State {
-    fn register_future(&mut self, future: FutureHolder) {
-        self.futures.insert(future.id, future);
-    }
-
-    fn drop_future(&mut self, id: u64) -> Option<FutureHolder> {
-        self.pollable.retain(|i| *i != id);
-        self.futures.remove(&id)
-    }
-
-    fn register_pollable(&mut self, id: u64) {
-        if !self.pollable.contains(&id) {
-            self.pollable.push_back(id);
+    fn register_future(&self, future: FutureHolder, threads: Threads) {
+        let mut futures = self.0.lock();
+        if futures.pollable_next.remove(&future.id) {
+            futures.pollable.push_back(future);
+            threads.unpark_random_thread();
+        } else {
+            futures.pending.insert(future.id, future);
         }
     }
 
-    fn cancel(&mut self, id: u64) {
-        let pollable_len = self.pollable.len();
-        if let Some(future) = self.drop_future(id) {
-            // Only run the last poll if the future was pollable
-            if self.pollable.len() != pollable_len {
-                future.last_run();
+    fn register_pollable(&self, id: u64) {
+        let mut futures = self.0.lock();
+        if let Some(future) = futures.pending.remove(&id) {
+            // Future was pending, mark it as pollable
+            futures.pollable.push_back(future);
+        } else {
+            // Future hasn't been registered yet
+            futures.pollable_next.insert(id);
+        }
+    }
+
+    fn has_pollable_tasks(&self) -> bool {
+        !self.0.lock().pollable.is_empty()
+    }
+
+    fn cancel(&self, id: u64) {
+        let mut futures = self.0.lock();
+        // If the future was pending, do nothing, otherwise...
+        if futures.pending.remove(&id).is_none() {
+            // ...check if it was pollable
+            if let Some((index, _)) = futures
+                .pollable
+                .iter()
+                .enumerate()
+                .find(|(_, future)| future.id == id)
+            {
+                if let Some(future) = futures.pollable.remove(index) {
+                    // If it was pollable, give it one last chance
+                    future.last_run();
+                }
             }
         }
     }
 
-    fn next(&mut self) -> Option<FutureHolder> {
-        let mut future = None;
-        let mut attempts = VecDeque::new();
-        while let Some(id) = self.pollable.pop_front() {
-            future = self.drop_future(id);
-            if future.is_some() {
-                break;
-            }
-            attempts.push_back(id);
-        }
-        for attempt in attempts {
-            self.pollable.push_back(attempt);
-        }
-        future
+    fn next(&self) -> Option<FutureHolder> {
+        self.0.lock().pollable.pop_front()
     }
 }
 
@@ -134,18 +142,18 @@ impl State {
 struct MyWaker {
     id: u64,
     threads: Threads,
-    state: Arc<Mutex<State>>,
+    state: State,
 }
 
 impl MyWaker {
-    fn new(id: u64, threads: Threads, state: Arc<Mutex<State>>) -> Self {
+    fn new(id: u64, threads: Threads, state: State) -> Self {
         Self { id, threads, state }
     }
 }
 
 impl Wake for MyWaker {
     fn wake(self: Arc<Self>) {
-        self.state.lock().register_pollable(self.id);
+        self.state.register_pollable(self.id);
         self.threads.unpark_random_thread();
     }
 }
@@ -162,8 +170,9 @@ static DUMMY_WAKER: Lazy<Waker> = Lazy::new(|| Arc::new(DummyWaker).into());
 /* Holds the future and its waker */
 struct FutureHolder {
     id: u64,
-    state: Arc<Mutex<State>>,
     future: Pin<Box<dyn Future<Output = ()> + Send>>,
+    threads: Threads,
+    state: State,
     waker: Waker,
 }
 
@@ -172,13 +181,14 @@ impl FutureHolder {
         id: u64,
         future: F,
         threads: Threads,
-        state: Arc<Mutex<State>>,
+        state: State,
     ) -> Self {
-        let waker = Arc::new(MyWaker::new(id, threads, state.clone()));
+        let waker = Arc::new(MyWaker::new(id, threads.clone(), state.clone()));
         Self {
             id,
-            state,
             future: Box::pin(future),
+            threads,
+            state,
             waker: waker.into(),
         }
     }
@@ -188,7 +198,8 @@ impl FutureHolder {
         match self.future.as_mut().poll(&mut ctx) {
             Poll::Ready(()) => true,
             Poll::Pending => {
-                self.state.clone().lock().register_future(self);
+                let threads = self.threads.clone();
+                self.state.clone().register_future(self, threads);
                 false
             }
         }
@@ -252,7 +263,7 @@ impl Wake for ReceiverWaker {
 struct Executor {
     main_tasks: MainTasks,
     threads: Threads,
-    state: Arc<Mutex<State>>,
+    state: State,
 }
 
 impl Executor {
@@ -265,19 +276,11 @@ impl Executor {
     }
 
     fn next(&self, local_executor: &Executor) -> Option<FutureHolder> {
-        local_executor
-            .state
-            .lock()
-            .next()
-            .or_else(|| self.state.lock().next())
+        local_executor.state.next().or_else(|| self.state.next())
     }
 
     fn main_task_exited(&self, id: u64) -> bool {
         !self.main_tasks.contains(id)
-    }
-
-    fn has_pollable_tasks(&self) -> bool {
-        !self.state.lock().pollable.is_empty()
     }
 
     fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(
@@ -307,7 +310,7 @@ impl Executor {
                     return res;
                 }
             }
-            if !self.has_pollable_tasks() {
+            if !self.state.has_pollable_tasks() {
                 parker.park();
             }
         }
@@ -352,14 +355,14 @@ pub struct JoinHandle<R> {
     id: u64,
     receiver: async_channel::Receiver<R>,
     main_tasks: MainTasks,
-    state: Arc<Mutex<State>>,
+    state: State,
 }
 
 impl<R> JoinHandle<R> {
     /// Cancel a spawned task, returning its result if it was finished
     pub fn cancel(self) -> Option<R> {
         self.main_tasks.drop(self.id);
-        self.state.lock().cancel(self.id);
+        self.state.cancel(self.id);
         self.receiver.try_recv().ok()
     }
 }
