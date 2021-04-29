@@ -18,6 +18,18 @@ use once_cell::sync::Lazy;
 use parking::{Parker, Unparker};
 use parking_lot::{Mutex, RwLock};
 
+/* Implicit global Executor */
+static EXECUTOR: Lazy<Executor> = Lazy::new(Executor::default);
+
+/* List of wokers we spawned */
+static WORKERS: Lazy<Mutex<Vec<Worker>>> = Lazy::new(Default::default);
+
+/* Implicit State for futures local to this thread */
+thread_local! {
+    static PARKER: Parker = Parker::new();
+    static LOCAL_EXECUTOR: Executor = Executor::local();
+}
+
 /* The list of "main" block_on tasks */
 #[derive(Clone, Default)]
 struct MainTasks(Arc<Mutex<HashMap<u64, Unparker>>>);
@@ -165,8 +177,6 @@ impl Wake for DummyWaker {
     fn wake(self: Arc<Self>) {}
 }
 
-static DUMMY_WAKER: Lazy<Waker> = Lazy::new(|| Arc::new(DummyWaker).into());
-
 /* Holds the future and its waker */
 struct FutureHolder {
     id: u64,
@@ -206,6 +216,7 @@ impl FutureHolder {
     }
 
     fn last_run(mut self) {
+        static DUMMY_WAKER: Lazy<Waker> = Lazy::new(|| Arc::new(DummyWaker).into());
         let mut cx = Context::from_waker(&*DUMMY_WAKER);
         let _ = self.future.as_mut().poll(&mut cx);
     }
@@ -214,6 +225,7 @@ impl FutureHolder {
 /* Unsafe wrapper for faking Send on local futures.
  * This is safe as we're guaranteed not to actually Send them. */
 struct LocalFuture<R, F: Future<Output = R>>(F);
+struct LocalRes<R>(R);
 
 impl<R, F: Future<Output = R>> Future for LocalFuture<R, F> {
     type Output = LocalRes<R>;
@@ -224,8 +236,6 @@ impl<R, F: Future<Output = R>> Future for LocalFuture<R, F> {
             .map(LocalRes)
     }
 }
-
-struct LocalRes<R>(R);
 
 unsafe impl<R, F: Future<Output = R>> Send for LocalFuture<R, F> {}
 unsafe impl<R> Send for LocalRes<R> {}
@@ -261,6 +271,8 @@ impl Wake for ReceiverWaker {
 /* The actual executor */
 #[derive(Clone, Default)]
 struct Executor {
+    /* Generate a new id for each task */
+    task_id: Arc<AtomicU64>,
     main_tasks: MainTasks,
     threads: Threads,
     state: State,
@@ -274,10 +286,15 @@ enum SetupResult<R> {
 impl Executor {
     fn local() -> Self {
         PARKER.with(|parker| Self {
+            task_id: Arc::new(AtomicU64::new(1)),
             main_tasks: Default::default(),
             threads: Threads::default().with_current(parker.unparker()),
             state: Default::default(),
         })
+    }
+
+    fn next_task_id(&self) -> u64 {
+        self.task_id.fetch_add(1, Ordering::SeqCst)
     }
 
     fn next(&self, local_executor: &Executor) -> Option<FutureHolder> {
@@ -291,8 +308,7 @@ impl Executor {
     fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(&self, future: F) -> R {
         PARKER.with(|parker| match self.setup(future, parker) {
             SetupResult::Ok(res) => res,
-            SetupResult::Pending { main_id, receiver } => LOCAL_EXECUTOR
-                .with(|local_executor| self.run(main_id, receiver, parker, local_executor)),
+            SetupResult::Pending { main_id, receiver } => self.run(main_id, receiver, parker),
         })
     }
 
@@ -319,9 +335,8 @@ impl Executor {
         main_id: u64,
         mut receiver: Receiver<R>,
         parker: &Parker,
-        local_executor: &Executor,
     ) -> R {
-        loop {
+        LOCAL_EXECUTOR.with(|local_executor| loop {
             while let Some(future) = self.next(local_executor) {
                 let id = future.id;
                 if future.run() {
@@ -336,7 +351,7 @@ impl Executor {
             if !self.state.has_pollable_tasks() {
                 parker.park();
             }
-        }
+        })
     }
 
     fn poll_receiver<R>(&self, receiver: &mut Receiver<R>) -> Option<R> {
@@ -352,7 +367,7 @@ impl Executor {
         &self,
         future: F,
     ) -> JoinHandle<R> {
-        let id = TASK_ID.fetch_add(1, Ordering::SeqCst);
+        let id = self.next_task_id();
         let (sender, receiver) = async_channel::bounded(1);
         FutureHolder::new(
             id,
@@ -418,12 +433,6 @@ impl<R> Future for LocalJoinHandle<R> {
     }
 }
 
-/* Generate a new id for each task */
-static TASK_ID: AtomicU64 = AtomicU64::new(1);
-
-/* Implicit global Executor */
-static EXECUTOR: Lazy<Executor> = Lazy::new(Executor::default);
-
 /// Run a worker that will end once the given future is Ready on the current thread
 pub fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(future: F) -> R {
     EXECUTOR.block_on(future)
@@ -454,8 +463,6 @@ impl Worker {
     }
 }
 
-static WORKERS: Lazy<Mutex<Vec<Worker>>> = Lazy::new(Default::default);
-
 /// Run new worker threads
 pub fn spawn_workers(threads: u8) {
     let mut workers = WORKERS.lock();
@@ -482,12 +489,6 @@ pub fn terminate_workers() {
     for worker in workers.drain(..) {
         worker.terminate();
     }
-}
-
-/* Implicit State for futures local to this thread */
-thread_local! {
-    static PARKER: Parker = Parker::new();
-    static LOCAL_EXECUTOR: Executor = Executor::local();
 }
 
 /// Spawn a Future on the current thread (thus not requiring it to be Send)
