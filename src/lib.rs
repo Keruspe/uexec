@@ -18,11 +18,33 @@ use once_cell::sync::Lazy;
 use parking::{Parker, Unparker};
 use parking_lot::Mutex;
 
+/* The list of "main" block_on tasks */
+#[derive(Clone, Default)]
+struct MainTasks(Arc<Mutex<HashMap<u64, Unparker>>>);
+
+impl MainTasks {
+    fn register(&self, id: u64, unparker: Unparker) {
+        self.0.lock().insert(id, unparker);
+    }
+
+    fn contains(&self, id: u64) -> bool {
+        self.0.lock().contains_key(&id)
+    }
+
+    fn remove(&self, id: u64) -> Option<Unparker> {
+        self.0.lock().remove(&id)
+    }
+
+    fn drop(&self, id: u64) {
+        if let Some(thread) = self.remove(id) {
+            thread.unpark();
+        }
+    }
+}
+
 /* The common state containing all the futures */
 #[derive(Default)]
 struct State {
-    /* The list of "main" block_on tasks */
-    main_tasks: HashMap<u64, Unparker>,
     /* Pending futures */
     futures: HashMap<u64, FutureHolder>,
     /* List of tasks that need polling */
@@ -32,16 +54,6 @@ struct State {
 }
 
 impl State {
-    fn register_main_task(&mut self, id: u64, unparker: Unparker) {
-        self.main_tasks.insert(id, unparker);
-    }
-
-    fn drop_main_task(&mut self, id: u64) {
-        if let Some(thread) = self.main_tasks.remove(&id) {
-            thread.unpark();
-        }
-    }
-
     fn register_future(&mut self, future: FutureHolder) {
         self.futures.insert(future.id, future);
     }
@@ -58,7 +70,6 @@ impl State {
     }
 
     fn cancel(&mut self, id: u64) {
-        self.drop_main_task(id);
         let pollable_len = self.pollable.len();
         if let Some(future) = self.drop_future(id) {
             // Only run the last poll if the future was pollable
@@ -234,12 +245,14 @@ impl Wake for ReceiverWaker {
 /* The actual executor */
 #[derive(Clone, Default)]
 struct Executor {
+    main_tasks: MainTasks,
     state: Arc<Mutex<State>>,
 }
 
 impl Executor {
     fn local() -> Self {
         PARKER.with(|parker| Self {
+            main_tasks: Default::default(),
             state: Arc::new(Mutex::new(
                 State::default().with_current_thread(parker.unparker()),
             )),
@@ -255,7 +268,7 @@ impl Executor {
     }
 
     fn main_task_exited(&self, id: u64) -> bool {
-        !self.state.lock().main_tasks.contains_key(&id)
+        !self.main_tasks.contains(id)
     }
 
     fn has_pollable_tasks(&self) -> bool {
@@ -272,18 +285,16 @@ impl Executor {
         let handle = self.spawn(future);
         let main_id = handle.id;
         let mut receiver = Receiver::new(handle, parker.unparker());
-        self.state
-            .lock()
-            .register_main_task(main_id, parker.unparker());
+        self.main_tasks.register(main_id, parker.unparker());
         if let Some(res) = self.poll_receiver(&mut receiver) {
-            self.state.lock().drop_main_task(main_id);
+            self.main_tasks.drop(main_id);
             return res;
         }
         loop {
             while let Some(future) = self.next(local_executor) {
                 let id = future.id;
                 if future.run() {
-                    self.state.lock().drop_main_task(id);
+                    self.main_tasks.drop(id);
                 }
             }
             if self.main_task_exited(main_id) {
@@ -324,6 +335,7 @@ impl Executor {
         JoinHandle {
             id,
             receiver,
+            main_tasks: self.main_tasks.clone(),
             state: self.state.clone(),
         }
     }
@@ -333,12 +345,14 @@ impl Executor {
 pub struct JoinHandle<R> {
     id: u64,
     receiver: async_channel::Receiver<R>,
+    main_tasks: MainTasks,
     state: Arc<Mutex<State>>,
 }
 
 impl<R> JoinHandle<R> {
     /// Cancel a spawned task, returning its result if it was finished
     pub fn cancel(self) -> Option<R> {
+        self.main_tasks.drop(self.id);
         self.state.lock().cancel(self.id);
         self.receiver.try_recv().ok()
     }
