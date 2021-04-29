@@ -321,24 +321,27 @@ impl Executor {
     }
 
     fn block_on<R: Send + 'static, F: Future<Output = R> + Send + 'static>(&self, future: F) -> R {
-        PARKER.with(|parker| match self.setup(future, parker) {
-            SetupResult::Ok(res) => res,
-            SetupResult::Pending {
-                receiver,
-                main_task_exited,
-            } => self.run(receiver, main_task_exited, parker),
+        LOCAL_EXECUTOR.with(|local_executor| {
+            PARKER.with(|parker| match self.setup(future, local_executor, parker) {
+                SetupResult::Ok(res) => res,
+                SetupResult::Pending {
+                    receiver,
+                    main_task_exited,
+                } => self.run(receiver, main_task_exited, local_executor, parker),
+            })
         })
     }
 
     fn setup<R: Send + 'static, F: Future<Output = R> + Send + 'static>(
         &self,
         future: F,
+        local_executor: &Executor,
         parker: &Parker,
     ) -> SetupResult<R> {
         self.threads.register_current(parker.unparker());
         let main_task = MainTaskContext::new(parker.unparker());
         let main_task_exited = main_task.exited.clone();
-        let handle = self._spawn(future, Some(main_task));
+        let handle = local_executor._spawn(future, Some(main_task));
         let mut receiver = Receiver::new(handle, parker.unparker());
         if let Some(res) = self.poll_receiver(&mut receiver) {
             SetupResult::Ok(res)
@@ -354,9 +357,10 @@ impl Executor {
         &self,
         mut receiver: Receiver<R>,
         main_task_exited: Arc<AtomicBool>,
+        local_executor: &Executor,
         parker: &Parker,
     ) -> R {
-        LOCAL_EXECUTOR.with(|local_executor| loop {
+        loop {
             while let Some(future) = self.next(local_executor) {
                 future.run();
             }
@@ -368,7 +372,7 @@ impl Executor {
             if !self.state.has_pollable_tasks() {
                 parker.park();
             }
-        })
+        }
     }
 
     fn poll_receiver<R>(&self, receiver: &mut Receiver<R>) -> Option<R> {
