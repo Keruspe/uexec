@@ -56,11 +56,15 @@ impl MainTasks {
 
 /* List of active threads */
 #[derive(Clone, Default)]
-struct Threads(Arc<RwLock<HashMap<ThreadId, Unparker>>>);
+struct Threads(Arc<RwLock<HashMap<ThreadId, (u8, Unparker)>>>);
 
 impl Threads {
     fn register_current(&self, unparker: Unparker) {
-        self.0.write().insert(thread::current().id(), unparker);
+        self.0
+            .write()
+            .entry(thread::current().id())
+            .and_modify(|(count, _)| *count += 1)
+            .or_insert((1, unparker));
     }
 
     fn with_current(self, unparker: Unparker) -> Self {
@@ -68,8 +72,17 @@ impl Threads {
         self
     }
 
+    fn deregister(&self, thread: ThreadId) {
+        let mut threads = self.0.write();
+        if let Some((count, unparker)) = threads.remove(&thread) {
+            if count > 1 {
+                threads.insert(thread, (count - 1, unparker));
+            }
+        }
+    }
+
     fn deregister_current(&self) {
-        self.0.write().remove(&thread::current().id());
+        self.deregister(thread::current().id());
         self.unpark_random_thread();
     }
 
@@ -77,7 +90,7 @@ impl Threads {
         let threads = self.0.read();
         if !threads.is_empty() {
             let i = fastrand::usize(..threads.len());
-            for thread in threads.values().skip(i).chain(threads.values().take(i)) {
+            for (_, thread) in threads.values().skip(i).chain(threads.values().take(i)) {
                 if thread.unpark() {
                     return;
                 }
