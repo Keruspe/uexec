@@ -1,0 +1,60 @@
+use crate::{local_future::LocalRes, state::State};
+
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
+
+use futures_core::Stream;
+
+/// Wait for a spawned task to complete or cancel it.
+pub struct JoinHandle<R> {
+    id: u64,
+    receiver: async_channel::Receiver<R>,
+    state: State,
+}
+
+impl<R> JoinHandle<R> {
+    pub(crate) fn new(id: u64, receiver: async_channel::Receiver<R>, state: State) -> Self {
+        Self {
+            id,
+            receiver,
+            state,
+        }
+    }
+
+    /// Cancel a spawned task, returning its result if it was finished
+    pub fn cancel(self) -> Option<R> {
+        self.state.cancel(self.id);
+        self.receiver.try_recv().ok()
+    }
+}
+
+impl<R> Future for JoinHandle<R> {
+    type Output = R;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.receiver)
+            .poll_next(cx)
+            .map(|res| res.expect("inner channel isn't expected to fail"))
+    }
+}
+
+/// Wait for a spawned local task to complete or cancel it.
+pub struct LocalJoinHandle<R>(pub(crate) JoinHandle<LocalRes<R>>);
+
+impl<R> LocalJoinHandle<R> {
+    /// Cancel a spawned local task, returning its result if it was finished
+    pub fn cancel(self) -> Option<R> {
+        self.0.cancel().map(|res| res.0)
+    }
+}
+
+impl<R> Future for LocalJoinHandle<R> {
+    type Output = R;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(cx).map(|res| res.0)
+    }
+}
