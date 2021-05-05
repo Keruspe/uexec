@@ -15,15 +15,19 @@ mod workers;
 use executor::Executor;
 use handle::{JoinHandle, LocalJoinHandle};
 use local_future::LocalFuture;
+use waker::DummyWaker;
 use workers::Workers;
 
-use std::future::Future;
+use std::{future::Future, sync::Arc, task::Waker};
 
 use crossbeam_utils::sync::Parker;
 use once_cell::sync::Lazy;
 
 /* Implicit global Executor */
 static EXECUTOR: Lazy<Executor> = Lazy::new(Default::default);
+
+/* Internal noop waker */
+static DUMMY_WAKER: Lazy<Waker> = Lazy::new(|| Arc::new(DummyWaker).into());
 
 /* List of wokers we spawned */
 static WORKERS: Lazy<Workers> = Lazy::new(Default::default);

@@ -1,9 +1,4 @@
-use crate::{
-    main_task::MainTaskContext,
-    state::State,
-    threads::Threads,
-    waker::{DummyWaker, MyWaker},
-};
+use crate::{main_task::MainTaskContext, state::State, threads::Threads, waker::MyWaker};
 
 use std::{
     future::Future,
@@ -11,8 +6,6 @@ use std::{
     sync::Arc,
     task::{Context, Poll, Waker},
 };
-
-use once_cell::sync::Lazy;
 
 /* Holds the future and its waker */
 pub(crate) struct FutureHolder {
@@ -59,8 +52,7 @@ impl FutureHolder {
     }
 
     pub(crate) fn last_run(mut self) {
-        static DUMMY_WAKER: Lazy<Waker> = Lazy::new(|| Arc::new(DummyWaker).into());
-        let mut cx = Context::from_waker(&*DUMMY_WAKER);
+        let mut cx = Context::from_waker(&*crate::DUMMY_WAKER);
         let _ = self.future.as_mut().poll(&mut cx);
         self.exit_main_task();
     }

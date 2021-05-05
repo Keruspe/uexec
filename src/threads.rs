@@ -43,7 +43,7 @@ impl Threads {
         let threads = self.0.read();
         if !threads.is_empty() {
             let i = fastrand::usize(..threads.len());
-            threads.values().cycle().skip(i).next().unwrap().1.unpark();
+            threads.values().cycle().nth(i).unwrap().1.unpark();
         }
     }
 }
