@@ -3,7 +3,7 @@ use std::sync::{
     Arc,
 };
 
-use parking::Unparker;
+use crossbeam_utils::sync::Unparker;
 
 /* Context to properly exit block_on once the main task has exited */
 pub(crate) struct MainTaskContext {

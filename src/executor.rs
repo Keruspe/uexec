@@ -12,7 +12,7 @@ use std::{
     task::Poll,
 };
 
-use parking::Parker;
+use crossbeam_utils::sync::Parker;
 
 /* The actual executor */
 #[derive(Clone, Default)]
@@ -35,7 +35,7 @@ impl Executor {
     pub(crate) fn local() -> Self {
         crate::PARKER.with(|parker| Self {
             task_id: Arc::new(AtomicU64::new(1)),
-            threads: Threads::default().with_current(parker.unparker()),
+            threads: Threads::default().with_current(parker.unparker().clone()),
             state: Default::default(),
         })
     }
@@ -66,11 +66,11 @@ impl Executor {
         local_executor: &Executor,
         parker: &Parker,
     ) -> SetupResult<R> {
-        self.threads.register_current(parker.unparker());
-        let main_task = MainTaskContext::new(parker.unparker());
+        self.threads.register_current(parker.unparker().clone());
+        let main_task = MainTaskContext::new(parker.unparker().clone());
         let main_task_exited = main_task.exited();
         let handle = local_executor._spawn(LocalFuture(future), Some(main_task));
-        let mut receiver = Receiver::new(handle, parker.unparker());
+        let mut receiver = Receiver::new(handle, parker.unparker().clone());
         if let Some(res) = self.poll_receiver(&mut receiver) {
             SetupResult::Ok(res)
         } else {

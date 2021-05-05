@@ -19,8 +19,8 @@ use workers::Workers;
 
 use std::future::Future;
 
+use crossbeam_utils::sync::Parker;
 use once_cell::sync::Lazy;
-use parking::Parker;
 
 /* Implicit global Executor */
 static EXECUTOR: Lazy<Executor> = Lazy::new(Default::default);

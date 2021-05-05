@@ -4,7 +4,7 @@ use std::{
     thread::{self, ThreadId},
 };
 
-use parking::Unparker;
+use crossbeam_utils::sync::Unparker;
 use parking_lot::RwLock;
 
 /* List of active threads */
@@ -43,11 +43,7 @@ impl Threads {
         let threads = self.0.read();
         if !threads.is_empty() {
             let i = fastrand::usize(..threads.len());
-            for (_, thread) in threads.values().skip(i).chain(threads.values().take(i)) {
-                if thread.unpark() {
-                    return;
-                }
-            }
+            threads.values().cycle().skip(i).next().unwrap().1.unpark();
         }
     }
 }

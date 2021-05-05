@@ -7,7 +7,7 @@ use std::{
     task::{Context, Poll, Wake, Waker},
 };
 
-use parking::Unparker;
+use crossbeam_utils::sync::Unparker;
 
 /* Facility to return data from block_on */
 pub(crate) struct Receiver<T> {
