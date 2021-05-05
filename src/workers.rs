@@ -10,10 +10,10 @@ impl Workers {
     pub(crate) fn spawn(&self, threads: u8) {
         let mut workers = self.0.lock();
         for _ in 0..threads {
-            let (sender, receiver) = async_channel::bounded(1);
+            let (sender, receiver) = flume::bounded(1);
             let handle = thread::spawn(|| {
                 crate::block_on(async move {
-                    let _ = receiver.recv().await;
+                    let _ = receiver.recv_async().await;
                 })
             });
             workers.push(Worker {
@@ -35,13 +35,13 @@ impl Workers {
 }
 
 struct Worker {
-    trigger: async_channel::Sender<()>,
+    trigger: flume::Sender<()>,
     thread: JoinHandle<()>,
 }
 
 impl Worker {
     fn trigger_termination(&self) {
-        let _ = self.trigger.try_send(());
+        let _ = self.trigger.send(());
     }
 
     fn terminate(self) {

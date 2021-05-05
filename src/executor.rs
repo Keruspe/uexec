@@ -125,12 +125,12 @@ impl Executor {
         main_task: Option<MainTaskContext>,
     ) -> JoinHandle<R> {
         let id = self.next_task_id();
-        let (sender, receiver) = async_channel::bounded(1);
+        let (sender, receiver) = flume::bounded(1);
         FutureHolder::new(
             id,
             async move {
                 let res = future.await;
-                drop(sender.send(res).await);
+                drop(sender.send_async(res).await);
             },
             self.threads.clone(),
             self.state.clone(),

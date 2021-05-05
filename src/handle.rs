@@ -6,20 +6,21 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures_core::Stream;
-
 /// Wait for a spawned task to complete or cancel it.
 pub struct JoinHandle<R> {
     id: u64,
-    receiver: async_channel::Receiver<R>,
+    receiver: flume::Receiver<R>,
+    receiver_fut: Pin<Box<dyn Future<Output = Result<R, flume::RecvError>>>>,
     state: State,
 }
 
-impl<R> JoinHandle<R> {
-    pub(crate) fn new(id: u64, receiver: async_channel::Receiver<R>, state: State) -> Self {
+impl<R: 'static> JoinHandle<R> {
+    pub(crate) fn new(id: u64, receiver: flume::Receiver<R>, state: State) -> Self {
+        let receiver_fut = Box::pin(receiver.clone().into_recv_async());
         Self {
             id,
             receiver,
+            receiver_fut,
             state,
         }
     }
@@ -35,16 +36,19 @@ impl<R> Future for JoinHandle<R> {
     type Output = R;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.receiver)
-            .poll_next(cx)
+        self.receiver_fut
+            .as_mut()
+            .poll(cx)
             .map(|res| res.expect("inner channel isn't expected to fail"))
     }
 }
 
+unsafe impl<R: Send> Send for JoinHandle<R> {}
+
 /// Wait for a spawned local task to complete or cancel it.
 pub struct LocalJoinHandle<R>(pub(crate) JoinHandle<LocalRes<R>>);
 
-impl<R> LocalJoinHandle<R> {
+impl<R: 'static> LocalJoinHandle<R> {
     /// Cancel a spawned local task, returning its result if it was finished
     pub fn cancel(self) -> Option<R> {
         self.0.cancel().map(|res| res.0)
