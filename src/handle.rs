@@ -73,6 +73,8 @@ impl<R> Future for LocalJoinHandle<R> {
 
 impl<R> fmt::Debug for LocalJoinHandle<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LocalJoinHandle").field("id", &self.0.id).finish()
+        f.debug_struct("LocalJoinHandle")
+            .field("id", &self.0.id)
+            .finish()
     }
 }
