@@ -1,3 +1,7 @@
+# Version 0.1.3
+
+- Internal refactoring
+
 # Version 0.1.2
 
 - Documentation updates
