@@ -1,3 +1,7 @@
+# Version 0.1.2
+
+- Documentation updates
+
 # Version 0.1.1
 
 - Properly export JoinHandle
