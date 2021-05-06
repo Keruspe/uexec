@@ -12,7 +12,7 @@ Simple work-stealing global and local executor
 
 # Examples
 
-```
+```rust
 # use futures_lite::future;
 
 // spawn several worker threads
