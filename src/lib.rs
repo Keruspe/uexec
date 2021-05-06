@@ -8,7 +8,6 @@
 //!
 //! ```
 //! # use futures_lite::future;
-//!
 //! // spawn several worker threads
 //! uexec::spawn_workers(4);
 //!
