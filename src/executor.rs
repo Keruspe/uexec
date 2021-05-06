@@ -11,15 +11,16 @@ use std::{
     },
 };
 
+use crossbeam_deque::Worker;
 use crossbeam_utils::sync::Parker;
 
 /* The actual executor */
-#[derive(Default)]
 pub(crate) struct Executor {
     /* Generate a new id for each task */
     task_id: AtomicU64,
     threads: Threads,
     state: State,
+    worker: Worker<FutureHolder>,
 }
 
 enum SetupResult<R> {
@@ -32,10 +33,12 @@ enum SetupResult<R> {
 
 impl Executor {
     pub(crate) fn local() -> Self {
+        let worker = Worker::new_fifo();
         crate::PARKER.with(|parker| Self {
             task_id: AtomicU64::new(1),
-            threads: Threads::default().with_current(parker.unparker().clone()),
+            threads: Threads::default().with_current(worker.stealer(), parker.unparker().clone()),
             state: Default::default(),
+            worker,
         })
     }
 
@@ -44,7 +47,11 @@ impl Executor {
     }
 
     fn next(&self) -> Option<FutureHolder> {
-        self.state.next().or_else(|| crate::EXECUTOR.next())
+        self.worker
+            .pop()
+            .or_else(|| self.state.next())
+            .or_else(|| crate::EXECUTOR.steal(&self.worker))
+            .or_else(|| crate::EXECUTOR.next())
     }
 
     pub(crate) fn block_on<R: 'static, F: Future<Output = R> + 'static>(&self, future: F) -> R {
@@ -62,7 +69,7 @@ impl Executor {
         future: F,
         parker: &Parker,
     ) -> SetupResult<R> {
-        crate::EXECUTOR.register_current_thread(parker.unparker().clone());
+        crate::EXECUTOR.register_current_thread(self.worker.stealer(), parker.unparker().clone());
         let main_task = MainTaskContext::new(parker.unparker().clone());
         let main_task_exited = main_task.exited();
         let handle = self._spawn(LocalFuture(future), Some(main_task));

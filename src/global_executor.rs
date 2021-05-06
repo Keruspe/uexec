@@ -8,6 +8,7 @@ use std::{
     task::Poll,
 };
 
+use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use crossbeam_utils::sync::Unparker;
 
 /* The global executor state */
@@ -15,6 +16,7 @@ use crossbeam_utils::sync::Unparker;
 pub(crate) struct GlobalExecutor {
     /* Generate a new id for each task */
     task_id: AtomicU64,
+    injector: Injector<FutureHolder>,
     threads: Threads,
     state: State,
 }
@@ -22,6 +24,16 @@ pub(crate) struct GlobalExecutor {
 impl GlobalExecutor {
     fn next_task_id(&self) -> u64 {
         self.task_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(crate) fn steal(&self, worker: &Worker<FutureHolder>) -> Option<FutureHolder> {
+        loop {
+            match self.injector.steal_batch_and_pop(worker) {
+                Steal::Success(future) => return Some(future),
+                Steal::Empty => return None,
+                Steal::Retry => {}
+            }
+        }
     }
 
     pub(crate) fn next(&self) -> Option<FutureHolder> {
@@ -61,7 +73,11 @@ impl GlobalExecutor {
         self.state.has_pollable_tasks()
     }
 
-    pub(crate) fn register_current_thread(&self, unparker: Unparker) {
-        self.threads.register_current(unparker)
+    pub(crate) fn register_current_thread(
+        &self,
+        stealer: Stealer<FutureHolder>,
+        unparker: Unparker,
+    ) {
+        self.threads.register_current(stealer, unparker)
     }
 }
