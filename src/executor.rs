@@ -15,10 +15,10 @@ use std::{
 use crossbeam_utils::sync::Parker;
 
 /* The actual executor */
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub(crate) struct Executor {
     /* Generate a new id for each task */
-    task_id: Arc<AtomicU64>,
+    task_id: AtomicU64,
     threads: Threads,
     state: State,
 }
@@ -34,7 +34,7 @@ enum SetupResult<R> {
 impl Executor {
     pub(crate) fn local() -> Self {
         crate::PARKER.with(|parker| Self {
-            task_id: Arc::new(AtomicU64::new(1)),
+            task_id: AtomicU64::new(1),
             threads: Threads::default().with_current(parker.unparker().clone()),
             state: Default::default(),
         })
