@@ -48,7 +48,6 @@ mod waker;
 mod workers;
 
 use executor::Executor;
-use handle::{JoinHandle, LocalJoinHandle};
 use local_future::LocalFuture;
 use waker::DummyWaker;
 use workers::Workers;
@@ -73,6 +72,8 @@ thread_local! {
     static LOCAL_EXECUTOR: Executor = Executor::local();
 }
 
+pub use handle::{JoinHandle, LocalJoinHandle};
+
 /// Runs the global and the local executor on the current thread until the given future is Ready
 ///
 /// # Examples
@@ -95,7 +96,6 @@ pub fn block_on<R: 'static, F: Future<Output = R> + 'static>(future: F) -> R {
 ///
 /// ```
 /// # use futures_lite::future;
-///
 /// let task1 = uexec::spawn(async {
 ///     1 + 2
 /// });
@@ -122,7 +122,6 @@ pub fn spawn<R: Send + 'static, F: Future<Output = R> + Send + 'static>(
 ///
 /// ```
 /// # use futures_lite::future;
-///
 /// let task1 = uexec::spawn_local(async {
 ///     1 + 2
 /// });

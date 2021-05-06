@@ -1,6 +1,6 @@
 [package]
 name = "uexec"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Marc-Antoine Perennou <Marc-Antoine@Perennou.com>"]
 description = "Simple work-stealing global and local executor"
 edition = "2018"
