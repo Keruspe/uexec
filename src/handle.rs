@@ -1,6 +1,7 @@
 use crate::{local_future::LocalRes, state::State};
 
 use std::{
+    fmt,
     future::Future,
     pin::Pin,
     task::{Context, Poll},
@@ -46,6 +47,12 @@ impl<R> Future for JoinHandle<R> {
 
 unsafe impl<R: Send> Send for JoinHandle<R> {}
 
+impl<R> fmt::Debug for JoinHandle<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JoinHandle").field("id", &self.id).finish()
+    }
+}
+
 /// Wait for a spawned local task to complete or cancel it.
 pub struct LocalJoinHandle<R>(pub(crate) JoinHandle<LocalRes<R>>);
 
@@ -61,5 +68,11 @@ impl<R> Future for LocalJoinHandle<R> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         Pin::new(&mut self.0).poll(cx).map(|res| res.0)
+    }
+}
+
+impl<R> fmt::Debug for LocalJoinHandle<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocalJoinHandle").field("id", &self.0.id).finish()
     }
 }
