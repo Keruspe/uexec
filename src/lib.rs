@@ -86,7 +86,7 @@ pub use handle::{JoinHandle, LocalJoinHandle};
 /// });
 /// ```
 pub fn block_on<R: 'static, F: Future<Output = R> + 'static>(future: F) -> R {
-    EXECUTOR.block_on(future)
+    LOCAL_EXECUTOR.with(|executor| executor.block_on(future))
 }
 
 /// Spawns a task onto the multi-threaded global executor.

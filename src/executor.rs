@@ -44,32 +44,31 @@ impl Executor {
         self.task_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn next(&self, local_executor: &Executor) -> Option<FutureHolder> {
-        local_executor.state.next().or_else(|| self.state.next())
+    fn next(&self) -> Option<FutureHolder> {
+        self.state.next().or_else(|| crate::EXECUTOR.state.next())
     }
 
     pub(crate) fn block_on<R: 'static, F: Future<Output = R> + 'static>(&self, future: F) -> R {
-        crate::LOCAL_EXECUTOR.with(|local_executor| {
-            crate::PARKER.with(|parker| match self.setup(future, local_executor, parker) {
-                SetupResult::Ok(res) => res,
-                SetupResult::Pending {
-                    receiver,
-                    main_task_exited,
-                } => self.run(receiver, main_task_exited, local_executor, parker),
-            })
+        crate::PARKER.with(|parker| match self.setup(future, parker) {
+            SetupResult::Ok(res) => res,
+            SetupResult::Pending {
+                receiver,
+                main_task_exited,
+            } => self.run(receiver, main_task_exited, parker),
         })
     }
 
     fn setup<R: 'static, F: Future<Output = R> + 'static>(
         &self,
         future: F,
-        local_executor: &Executor,
         parker: &Parker,
     ) -> SetupResult<R> {
-        self.threads.register_current(parker.unparker().clone());
+        crate::EXECUTOR
+            .threads
+            .register_current(parker.unparker().clone());
         let main_task = MainTaskContext::new(parker.unparker().clone());
         let main_task_exited = main_task.exited();
-        let handle = local_executor._spawn(LocalFuture(future), Some(main_task));
+        let handle = self._spawn(LocalFuture(future), Some(main_task));
         let mut receiver = Receiver::new(handle, parker.unparker().clone());
         if let Some(res) = self.poll_receiver(&mut receiver) {
             SetupResult::Ok(res)
@@ -85,11 +84,10 @@ impl Executor {
         &self,
         mut receiver: Receiver<R>,
         main_task_exited: Arc<AtomicBool>,
-        local_executor: &Executor,
         parker: &Parker,
     ) -> R {
         loop {
-            while let Some(future) = self.next(local_executor) {
+            while let Some(future) = self.next() {
                 future.run();
             }
             if main_task_exited.load(Ordering::Acquire) {
@@ -97,7 +95,7 @@ impl Executor {
                     return res;
                 }
             }
-            if !self.state.has_pollable_tasks() {
+            if !self.state.has_pollable_tasks() && !crate::EXECUTOR.state.has_pollable_tasks() {
                 parker.park();
             }
         }
@@ -105,7 +103,7 @@ impl Executor {
 
     fn poll_receiver<R>(&self, receiver: &mut Receiver<R>) -> Option<R> {
         if let Poll::Ready(res) = receiver.poll() {
-            self.threads.deregister_current();
+            crate::EXECUTOR.threads.deregister_current();
             Some(res)
         } else {
             None
