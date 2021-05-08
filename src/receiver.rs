@@ -1,4 +1,4 @@
-use crate::{local_future::LocalRes, JoinHandle, LocalJoinHandle};
+use crate::LocalJoinHandle;
 
 use std::{
     future::Future,
@@ -16,9 +16,9 @@ pub(crate) struct Receiver<T> {
 }
 
 impl<T> Receiver<T> {
-    pub(crate) fn new(handle: JoinHandle<LocalRes<T>>, thread: Unparker) -> Self {
+    pub(crate) fn new(handle: LocalJoinHandle<T>, thread: Unparker) -> Self {
         Self {
-            handle: LocalJoinHandle(handle),
+            handle,
             waker: Arc::new(ReceiverWaker(thread)).into(),
         }
     }

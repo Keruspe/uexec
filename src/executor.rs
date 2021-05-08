@@ -1,6 +1,6 @@
 use crate::{
-    future_holder::FutureHolder, main_task::MainTaskContext, receiver::Receiver, state::State,
-    threads::Threads, JoinHandle, LocalFuture,
+    future_holder::FutureHolder, local_future::LocalRes, main_task::MainTaskContext,
+    receiver::Receiver, state::State, threads::Threads, JoinHandle, LocalFuture, LocalJoinHandle,
 };
 
 use std::{
@@ -9,7 +9,6 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
-    task::Poll,
 };
 
 use crossbeam_utils::sync::Parker;
@@ -26,7 +25,7 @@ pub(crate) struct Executor {
 enum SetupResult<R> {
     Ok(R),
     Pending {
-        receiver: Receiver<R>,
+        receiver: Receiver<LocalRes<R>>,
         main_task_exited: Arc<AtomicBool>,
     },
 }
@@ -45,7 +44,7 @@ impl Executor {
     }
 
     fn next(&self) -> Option<FutureHolder> {
-        self.state.next().or_else(|| crate::EXECUTOR.state.next())
+        self.state.next().or_else(|| crate::EXECUTOR.next())
     }
 
     pub(crate) fn block_on<R: 'static, F: Future<Output = R> + 'static>(&self, future: F) -> R {
@@ -63,15 +62,13 @@ impl Executor {
         future: F,
         parker: &Parker,
     ) -> SetupResult<R> {
-        crate::EXECUTOR
-            .threads
-            .register_current(parker.unparker().clone());
+        crate::EXECUTOR.register_current_thread(parker.unparker().clone());
         let main_task = MainTaskContext::new(parker.unparker().clone());
         let main_task_exited = main_task.exited();
         let handle = self._spawn(LocalFuture(future), Some(main_task));
         let mut receiver = Receiver::new(handle, parker.unparker().clone());
-        if let Some(res) = self.poll_receiver(&mut receiver) {
-            SetupResult::Ok(res)
+        if let Some(res) = crate::EXECUTOR.poll_receiver(&mut receiver) {
+            SetupResult::Ok(res.0)
         } else {
             SetupResult::Pending {
                 receiver,
@@ -82,7 +79,7 @@ impl Executor {
 
     fn run<R: 'static>(
         &self,
-        mut receiver: Receiver<R>,
+        mut receiver: Receiver<LocalRes<R>>,
         main_task_exited: Arc<AtomicBool>,
         parker: &Parker,
     ) -> R {
@@ -91,37 +88,29 @@ impl Executor {
                 future.run();
             }
             if main_task_exited.load(Ordering::Acquire) {
-                if let Some(res) = self.poll_receiver(&mut receiver) {
-                    return res;
+                if let Some(res) = crate::EXECUTOR.poll_receiver(&mut receiver) {
+                    return res.0;
                 }
             }
-            if !self.state.has_pollable_tasks() && !crate::EXECUTOR.state.has_pollable_tasks() {
+            if !self.state.has_pollable_tasks() && !crate::EXECUTOR.has_pollable_tasks() {
                 parker.park();
             }
         }
     }
 
-    fn poll_receiver<R>(&self, receiver: &mut Receiver<R>) -> Option<R> {
-        if let Poll::Ready(res) = receiver.poll() {
-            crate::EXECUTOR.threads.deregister_current();
-            Some(res)
-        } else {
-            None
-        }
-    }
-
-    pub(crate) fn spawn<R: Send + 'static, F: Future<Output = R> + Send + 'static>(
+    pub(crate) fn spawn<R: 'static, F: Future<Output = R> + 'static>(
         &self,
         future: F,
-    ) -> JoinHandle<R> {
+    ) -> LocalJoinHandle<R> {
         self._spawn(future, None)
     }
 
-    fn _spawn<R: Send + 'static, F: Future<Output = R> + Send + 'static>(
+    fn _spawn<R: 'static, F: Future<Output = R> + 'static>(
         &self,
         future: F,
         main_task: Option<MainTaskContext>,
-    ) -> JoinHandle<R> {
+    ) -> LocalJoinHandle<R> {
+        let future = LocalFuture(future);
         let id = self.next_task_id();
         let (sender, receiver) = flume::bounded(1);
         FutureHolder::new(
@@ -135,6 +124,6 @@ impl Executor {
             main_task,
         )
         .run();
-        JoinHandle::new(id, receiver, self.state.clone())
+        LocalJoinHandle(JoinHandle::new(id, receiver, self.state.clone()))
     }
 }

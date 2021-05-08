@@ -37,6 +37,7 @@ doc_comment::doctest!("../README.md");
 
 mod executor;
 mod future_holder;
+mod global_executor;
 mod handle;
 mod local_future;
 mod main_task;
@@ -47,6 +48,7 @@ mod waker;
 mod workers;
 
 use executor::Executor;
+use global_executor::GlobalExecutor;
 use local_future::LocalFuture;
 use waker::DummyWaker;
 use workers::Workers;
@@ -57,7 +59,7 @@ use crossbeam_utils::sync::Parker;
 use once_cell::sync::Lazy;
 
 /* Implicit global Executor */
-static EXECUTOR: Lazy<Executor> = Lazy::new(Default::default);
+static EXECUTOR: Lazy<GlobalExecutor> = Lazy::new(Default::default);
 
 /* Internal noop waker */
 static DUMMY_WAKER: Lazy<Waker> = Lazy::new(|| Arc::new(DummyWaker).into());
@@ -134,7 +136,7 @@ pub fn spawn<R: Send + 'static, F: Future<Output = R> + Send + 'static>(
 /// });
 /// ```
 pub fn spawn_local<R: 'static, F: Future<Output = R> + 'static>(future: F) -> LocalJoinHandle<R> {
-    LOCAL_EXECUTOR.with(|executor| LocalJoinHandle(executor.spawn(LocalFuture(future))))
+    LOCAL_EXECUTOR.with(|executor| executor.spawn(future))
 }
 
 /// Spawn new worker threads
