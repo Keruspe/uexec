@@ -20,7 +20,7 @@ pub(crate) struct Executor {
     task_id: AtomicU64,
     threads: Threads,
     state: State,
-    worker: Worker<FutureHolder>,
+    worker: Arc<Worker<FutureHolder>>,
 }
 
 enum SetupResult<R> {
@@ -38,7 +38,7 @@ impl Executor {
             task_id: AtomicU64::new(1),
             threads: Threads::default().with_current(worker.stealer(), parker.unparker().clone()),
             state: Default::default(),
-            worker,
+            worker: Arc::new(worker),
         })
     }
 
@@ -51,7 +51,6 @@ impl Executor {
             .pop()
             .or_else(|| self.state.next())
             .or_else(|| crate::EXECUTOR.steal(&self.worker))
-            .or_else(|| crate::EXECUTOR.next())
     }
 
     pub(crate) fn block_on<R: 'static, F: Future<Output = R> + 'static>(&self, future: F) -> R {
@@ -99,8 +98,12 @@ impl Executor {
                     return res.0;
                 }
             }
-            if !self.state.has_pollable_tasks() && !crate::EXECUTOR.has_pollable_tasks() {
-                parker.park();
+            if !self.state.has_pollable_tasks() && self.worker.is_empty() {
+                if let Some(future) = crate::EXECUTOR.steal(&self.worker) {
+                    future.run();
+                } else {
+                    parker.park();
+                }
             }
         }
     }

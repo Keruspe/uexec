@@ -6,7 +6,7 @@ use std::{
     thread::{self, ThreadId},
 };
 
-use crossbeam_deque::Stealer;
+use crossbeam_deque::{Steal, Stealer, Worker};
 use crossbeam_utils::sync::Unparker;
 use parking_lot::RwLock;
 
@@ -48,5 +48,35 @@ impl Threads {
             let i = fastrand::usize(..threads.len());
             threads.values().cycle().nth(i).unwrap().2.unpark();
         }
+    }
+
+    pub(crate) fn steal(
+        &self,
+        thread: ThreadId,
+        worker: &Worker<FutureHolder>,
+    ) -> Option<FutureHolder> {
+        let threads = self.0.read();
+        // Only consider the other threads, not the current one
+        let threads_nb = threads.len() - 1;
+        if threads_nb > 0 {
+            let i = fastrand::usize(..threads_nb);
+            for stealer in threads
+                .iter()
+                .filter(|(id, _)| **id != thread)
+                .map(|(_, (_, stealer, _))| stealer)
+                .cycle()
+                .skip(i)
+                .take(threads_nb)
+            {
+                loop {
+                    match stealer.steal_batch_and_pop(worker) {
+                        Steal::Success(future) => return Some(future),
+                        Steal::Empty => break,
+                        Steal::Retry => {}
+                    }
+                }
+            }
+        }
+        None
     }
 }

@@ -1,11 +1,10 @@
-use crate::{
-    future_holder::FutureHolder, receiver::Receiver, state::State, threads::Threads, JoinHandle,
-};
+use crate::{future_holder::FutureHolder, receiver::Receiver, threads::Threads, JoinHandle};
 
 use std::{
     future::Future,
     sync::atomic::{AtomicU64, Ordering},
     task::Poll,
+    thread,
 };
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
@@ -18,7 +17,6 @@ pub(crate) struct GlobalExecutor {
     task_id: AtomicU64,
     injector: Injector<FutureHolder>,
     threads: Threads,
-    state: State,
 }
 
 impl GlobalExecutor {
@@ -30,14 +28,10 @@ impl GlobalExecutor {
         loop {
             match self.injector.steal_batch_and_pop(worker) {
                 Steal::Success(future) => return Some(future),
-                Steal::Empty => return None,
+                Steal::Empty => return self.threads.steal(thread::current().id(), worker),
                 Steal::Retry => {}
             }
         }
-    }
-
-    pub(crate) fn next(&self) -> Option<FutureHolder> {
-        self.state.next()
     }
 
     pub(crate) fn poll_receiver<R>(&self, receiver: &mut Receiver<R>) -> Option<R> {
@@ -55,22 +49,18 @@ impl GlobalExecutor {
     ) -> JoinHandle<R> {
         let id = self.next_task_id();
         let (sender, receiver) = flume::bounded(1);
-        FutureHolder::new(
+        self.injector.push(FutureHolder::new(
             id,
             async move {
                 let res = future.await;
                 drop(sender.send_async(res).await);
             },
             self.threads.clone(),
-            self.state.clone(),
+            Default::default(), // FIXME: drop state
             None,
-        )
-        .run();
-        JoinHandle::new(id, receiver, self.state.clone())
-    }
-
-    pub(crate) fn has_pollable_tasks(&self) -> bool {
-        self.state.has_pollable_tasks()
+        ));
+        self.threads.unpark_random();
+        JoinHandle::new(id, receiver, Default::default()) // FIXME: drop state
     }
 
     pub(crate) fn register_current_thread(
