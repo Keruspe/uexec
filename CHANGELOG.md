@@ -1,3 +1,7 @@
+# Version 0.1.4
+
+- More internal refactoring
+
 # Version 0.1.3
 
 - Internal refactoring
