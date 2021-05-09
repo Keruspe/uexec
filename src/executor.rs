@@ -1,6 +1,6 @@
 use crate::{
     future_holder::FutureHolder, local_future::LocalRes, main_task::MainTaskContext,
-    receiver::Receiver, state::State, threads::Threads, JoinHandle, LocalFuture, LocalJoinHandle,
+    receiver::Receiver, state::State, JoinHandle, LocalFuture, LocalJoinHandle,
 };
 
 use std::{
@@ -12,15 +12,15 @@ use std::{
 };
 
 use crossbeam_deque::Worker;
-use crossbeam_utils::sync::Parker;
+use crossbeam_utils::sync::{Parker, Unparker};
 
 /* The actual executor */
 pub(crate) struct Executor {
     /* Generate a new id for each task */
     task_id: AtomicU64,
-    threads: Threads,
-    state: State,
     worker: Arc<Worker<FutureHolder>>,
+    local_state: State,
+    local_worker: Arc<Worker<FutureHolder>>,
 }
 
 enum SetupResult<R> {
@@ -34,23 +34,29 @@ enum SetupResult<R> {
 impl Executor {
     pub(crate) fn local() -> Self {
         let worker = Worker::new_fifo();
-        crate::PARKER.with(|parker| Self {
+        let local_worker = Worker::new_fifo();
+        Self {
             task_id: AtomicU64::new(1),
-            threads: Threads::default().with_current(worker.stealer(), parker.unparker().clone()),
-            state: Default::default(),
             worker: Arc::new(worker),
-        })
+            local_state: Default::default(),
+            local_worker: Arc::new(local_worker),
+        }
     }
 
     fn next_task_id(&self) -> u64 {
         self.task_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn next(&self) -> Option<FutureHolder> {
-        self.worker
+    fn next(&self) -> Option<(FutureHolder, Arc<Worker<FutureHolder>>)> {
+        self.local_worker
             .pop()
-            .or_else(|| self.state.next())
-            .or_else(|| crate::EXECUTOR.steal(&self.worker))
+            .map(|fut| (fut, self.local_worker.clone()))
+            .or_else(|| {
+                self.worker
+                    .pop()
+                    .or_else(|| crate::EXECUTOR.steal(&self.worker))
+                    .map(|fut| (fut, self.worker.clone()))
+            })
     }
 
     pub(crate) fn block_on<R: 'static, F: Future<Output = R> + 'static>(&self, future: F) -> R {
@@ -71,7 +77,11 @@ impl Executor {
         crate::EXECUTOR.register_current_thread(self.worker.stealer(), parker.unparker().clone());
         let main_task = MainTaskContext::new(parker.unparker().clone());
         let main_task_exited = main_task.exited();
-        let handle = self._spawn(LocalFuture(future), Some(main_task));
+        let handle = self._spawn(
+            LocalFuture(future),
+            parker.unparker().clone(),
+            Some(main_task),
+        );
         let mut receiver = Receiver::new(handle, parker.unparker().clone());
         if let Some(res) = crate::EXECUTOR.poll_receiver(&mut receiver) {
             SetupResult::Ok(res.0)
@@ -90,17 +100,17 @@ impl Executor {
         parker: &Parker,
     ) -> R {
         loop {
-            while let Some(future) = self.next() {
-                future.run();
+            while let Some((future, worker)) = self.next() {
+                future.run(worker, parker.unparker().clone());
             }
             if main_task_exited.load(Ordering::Acquire) {
                 if let Some(res) = crate::EXECUTOR.poll_receiver(&mut receiver) {
                     return res.0;
                 }
             }
-            if !self.state.has_pollable_tasks() && self.worker.is_empty() {
+            if self.local_worker.is_empty() && self.worker.is_empty() {
                 if let Some(future) = crate::EXECUTOR.steal(&self.worker) {
-                    future.run();
+                    future.run(self.worker.clone(), parker.unparker().clone());
                 } else {
                     parker.park();
                 }
@@ -110,14 +120,16 @@ impl Executor {
 
     pub(crate) fn spawn<R: 'static, F: Future<Output = R> + 'static>(
         &self,
+        unparker: Unparker,
         future: F,
     ) -> LocalJoinHandle<R> {
-        self._spawn(future, None)
+        self._spawn(future, unparker, None)
     }
 
     fn _spawn<R: 'static, F: Future<Output = R> + 'static>(
         &self,
         future: F,
+        unparker: Unparker,
         main_task: Option<MainTaskContext>,
     ) -> LocalJoinHandle<R> {
         let future = LocalFuture(future);
@@ -129,11 +141,10 @@ impl Executor {
                 let res = future.await;
                 drop(sender.send_async(res).await);
             },
-            self.threads.clone(),
-            self.state.clone(),
+            self.local_state.clone(),
             main_task,
         )
-        .run();
-        LocalJoinHandle(JoinHandle::new(id, receiver, self.state.clone()))
+        .run(self.local_worker.clone(), unparker);
+        LocalJoinHandle(JoinHandle::new(id, receiver, self.local_state.clone()))
     }
 }

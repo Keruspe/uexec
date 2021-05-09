@@ -23,11 +23,6 @@ impl Threads {
             .or_insert((1, stealer, unparker));
     }
 
-    pub(crate) fn with_current(self, stealer: Stealer<FutureHolder>, unparker: Unparker) -> Self {
-        self.register_current(stealer, unparker);
-        self
-    }
-
     fn deregister(&self, thread: ThreadId) {
         let mut threads = self.0.write();
         if let Some((count, stealer, unparker)) = threads.remove(&thread) {

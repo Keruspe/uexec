@@ -1,4 +1,6 @@
-use crate::{future_holder::FutureHolder, receiver::Receiver, threads::Threads, JoinHandle};
+use crate::{
+    future_holder::FutureHolder, receiver::Receiver, state::State, threads::Threads, JoinHandle,
+};
 
 use std::{
     future::Future,
@@ -16,6 +18,7 @@ pub(crate) struct GlobalExecutor {
     /* Generate a new id for each task */
     task_id: AtomicU64,
     injector: Injector<FutureHolder>,
+    state: State,
     threads: Threads,
 }
 
@@ -55,12 +58,11 @@ impl GlobalExecutor {
                 let res = future.await;
                 drop(sender.send_async(res).await);
             },
-            self.threads.clone(),
-            Default::default(), // FIXME: drop state
+            self.state.clone(),
             None,
         ));
         self.threads.unpark_random();
-        JoinHandle::new(id, receiver, Default::default()) // FIXME: drop state
+        JoinHandle::new(id, receiver, self.state.clone())
     }
 
     pub(crate) fn register_current_thread(

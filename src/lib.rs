@@ -136,7 +136,8 @@ pub fn spawn<R: Send + 'static, F: Future<Output = R> + Send + 'static>(
 /// });
 /// ```
 pub fn spawn_local<R: 'static, F: Future<Output = R> + 'static>(future: F) -> LocalJoinHandle<R> {
-    LOCAL_EXECUTOR.with(|executor| executor.spawn(future))
+    LOCAL_EXECUTOR
+        .with(|executor| PARKER.with(|parker| executor.spawn(parker.unparker().clone(), future)))
 }
 
 /// Spawn new worker threads
