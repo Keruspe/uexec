@@ -135,7 +135,7 @@ impl Executor {
         let future = LocalFuture(future);
         let id = self.next_task_id();
         let (sender, receiver) = flume::bounded(1);
-        FutureHolder::new(
+        let future = FutureHolder::new(
             id,
             async move {
                 let res = future.await;
@@ -143,8 +143,14 @@ impl Executor {
             },
             self.local_state.clone(),
             main_task,
-        )
-        .run(self.local_worker.clone(), unparker);
-        LocalJoinHandle(JoinHandle::new(id, receiver, self.local_state.clone()))
+        );
+        let canceled = future.canceled();
+        future.run(self.local_worker.clone(), unparker);
+        LocalJoinHandle(JoinHandle::new(
+            id,
+            receiver,
+            self.local_state.clone(),
+            canceled,
+        ))
     }
 }

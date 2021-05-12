@@ -20,6 +20,7 @@ pub(crate) struct FutureHolder {
     state: State,
     worker: Option<Arc<Worker<Self>>>,
     pollable: Arc<AtomicBool>,
+    canceled: Arc<AtomicBool>,
     main_task: Option<MainTaskContext>,
 }
 
@@ -36,6 +37,7 @@ impl FutureHolder {
             state,
             worker: None,
             pollable: Arc::new(AtomicBool::new(true)),
+            canceled: Arc::new(AtomicBool::new(false)),
             main_task,
         }
     }
@@ -44,7 +46,16 @@ impl FutureHolder {
         self.id
     }
 
+    pub(crate) fn canceled(&self) -> Arc<AtomicBool> {
+        self.canceled.clone()
+    }
+
     pub(crate) fn run(mut self, worker: Arc<Worker<Self>>, unparker: Unparker) {
+        if self.canceled.load(Ordering::Acquire) {
+            self.last_run();
+            return;
+        }
+
         let waker = Arc::new(MyWaker::new(
             self.id,
             Some(worker.clone()),
@@ -69,13 +80,11 @@ impl FutureHolder {
         }
     }
 
-    /* FIXME
     pub(crate) fn last_run(mut self) {
         let mut cx = Context::from_waker(&*crate::DUMMY_WAKER);
         let _ = self.future.as_mut().poll(&mut cx);
         self.exit_main_task();
     }
-    */
 
     fn exit_main_task(self) {
         if let Some(main_task) = self.main_task {

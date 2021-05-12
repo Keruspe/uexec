@@ -52,7 +52,7 @@ impl GlobalExecutor {
     ) -> JoinHandle<R> {
         let id = self.next_task_id();
         let (sender, receiver) = flume::bounded(1);
-        self.injector.push(FutureHolder::new(
+        let future = FutureHolder::new(
             id,
             async move {
                 let res = future.await;
@@ -60,9 +60,11 @@ impl GlobalExecutor {
             },
             self.state.clone(),
             None,
-        ));
+        );
+        let canceled = future.canceled();
+        self.injector.push(future);
         self.threads.unpark_random();
-        JoinHandle::new(id, receiver, self.state.clone())
+        JoinHandle::new(id, receiver, self.state.clone(), canceled)
     }
 
     pub(crate) fn register_current_thread(

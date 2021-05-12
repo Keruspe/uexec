@@ -17,8 +17,8 @@ impl State {
         self.0.lock().remove(&id)
     }
 
-    pub(crate) fn cancel(&self, id: u64) -> bool {
+    pub(crate) fn cancel(&self, id: u64) {
         // If the future was pending -not pollable-, do nothing and just drop it
-        !self.0.lock().remove(&id).is_none()
+        drop(self.0.lock().remove(&id));
     }
 }
