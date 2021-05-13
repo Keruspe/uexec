@@ -4,33 +4,41 @@ use std::{
     fmt,
     future::Future,
     pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
 };
 
 /// Wait for a spawned task to complete or cancel it.
 pub struct JoinHandle<R> {
     id: u64,
-    receiver_fut: Pin<Box<dyn Future<Output = Result<R, flume::RecvError>>>>,
+    receiver_fut: Pin<Box<dyn Future<Output = Result<R, flume::RecvError>> + Send>>,
     state: State,
+    canceled: Arc<AtomicBool>,
 }
 
-impl<R: 'static> JoinHandle<R> {
-    pub(crate) fn new(id: u64, receiver: flume::Receiver<R>, state: State) -> Self {
+impl<R: Send + 'static> JoinHandle<R> {
+    pub(crate) fn new(
+        id: u64,
+        receiver: flume::Receiver<R>,
+        state: State,
+        canceled: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             id,
             receiver_fut: Box::pin(receiver.into_recv_async()),
             state,
+            canceled,
         }
     }
 
     /// Cancel a spawned task, returning its result if it was finished
-    pub fn cancel(mut self) -> Option<R> {
-        let mut cx = Context::from_waker(&*crate::DUMMY_WAKER);
+    pub async fn cancel(self) -> Option<R> {
+        self.canceled.store(true, Ordering::Release);
         self.state.cancel(self.id);
-        match self.receiver_fut.as_mut().poll(&mut cx) {
-            Poll::Ready(res) => res.ok(),
-            Poll::Pending => None,
-        }
+        self.receiver_fut.await.ok()
     }
 }
 
@@ -45,8 +53,6 @@ impl<R> Future for JoinHandle<R> {
     }
 }
 
-unsafe impl<R: Send> Send for JoinHandle<R> {}
-
 impl<R> fmt::Debug for JoinHandle<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("JoinHandle").field("id", &self.id).finish()
@@ -58,8 +64,8 @@ pub struct LocalJoinHandle<R>(pub(crate) JoinHandle<LocalRes<R>>);
 
 impl<R: 'static> LocalJoinHandle<R> {
     /// Cancel a spawned local task, returning its result if it was finished
-    pub fn cancel(self) -> Option<R> {
-        self.0.cancel().map(|res| res.0)
+    pub async fn cancel(self) -> Option<R> {
+        self.0.cancel().await.map(|res| res.0)
     }
 }
 

@@ -53,9 +53,12 @@ use local_future::LocalFuture;
 use waker::DummyWaker;
 use workers::Workers;
 
-use std::{future::Future, sync::Arc, task::Waker};
+use std::{
+    future::Future,
+    sync::{atomic::AtomicBool, Arc},
+    task::Waker,
+};
 
-use crossbeam_utils::sync::Parker;
 use once_cell::sync::Lazy;
 
 /* Implicit global Executor */
@@ -69,8 +72,8 @@ static WORKERS: Lazy<Workers> = Lazy::new(Default::default);
 
 /* Implicit State for futures local to this thread */
 thread_local! {
-    static PARKER: Parker = Parker::new();
     static LOCAL_EXECUTOR: Executor = Executor::local();
+    static RUNS_WORKER: AtomicBool = AtomicBool::new(false);
 }
 
 pub use handle::{JoinHandle, LocalJoinHandle};
