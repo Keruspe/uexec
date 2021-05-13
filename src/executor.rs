@@ -12,15 +12,16 @@ use std::{
 };
 
 use crossbeam_deque::Worker;
-use crossbeam_utils::sync::{Parker, Unparker};
+use crossbeam_utils::sync::Parker;
 
 /* The actual executor */
 pub(crate) struct Executor {
     /* Generate a new id for each task */
     task_id: AtomicU64,
-    worker: Arc<Worker<FutureHolder>>,
+    worker: Worker<FutureHolder>,
     local_state: State,
-    local_worker: Arc<Worker<FutureHolder>>,
+    local_worker: Worker<FutureHolder>,
+    parker: Parker,
 }
 
 enum SetupResult<R> {
@@ -33,13 +34,12 @@ enum SetupResult<R> {
 
 impl Executor {
     pub(crate) fn local() -> Self {
-        let worker = Worker::new_fifo();
-        let local_worker = Worker::new_fifo();
         Self {
             task_id: AtomicU64::new(1),
-            worker: Arc::new(worker),
+            worker: Worker::new_fifo(),
             local_state: Default::default(),
-            local_worker: Arc::new(local_worker),
+            local_worker: Worker::new_fifo(),
+            parker: Default::default(),
         }
     }
 
@@ -47,42 +47,41 @@ impl Executor {
         self.task_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn next(&self) -> Option<(FutureHolder, Arc<Worker<FutureHolder>>)> {
-        self.local_worker
-            .pop()
-            .map(|fut| (fut, self.local_worker.clone()))
-            .or_else(|| {
-                self.worker
-                    .pop()
-                    .or_else(|| crate::EXECUTOR.steal(&self.worker))
-                    .map(|fut| (fut, self.worker.clone()))
-            })
+    fn next(&self) -> Option<(FutureHolder, bool)> {
+        self.local_worker.pop().map(|fut| (fut, true)).or_else(|| {
+            self.worker
+                .pop()
+                .or_else(|| crate::EXECUTOR.steal(&self.worker))
+                .map(|fut| (fut, false))
+        })
+    }
+
+    pub(crate) fn push_future(&self, future: FutureHolder, local: bool) {
+        if local {
+            self.local_worker.push(future);
+        } else {
+            self.worker.push(future);
+        }
+        self.parker.unparker().unpark();
     }
 
     pub(crate) fn block_on<R: 'static, F: Future<Output = R> + 'static>(&self, future: F) -> R {
-        crate::PARKER.with(|parker| match self.setup(future, parker) {
+        match self.setup(future) {
             SetupResult::Ok(res) => res,
             SetupResult::Pending {
                 receiver,
                 main_task_exited,
-            } => self.run(receiver, main_task_exited, parker),
-        })
+            } => self.run(receiver, main_task_exited),
+        }
     }
 
-    fn setup<R: 'static, F: Future<Output = R> + 'static>(
-        &self,
-        future: F,
-        parker: &Parker,
-    ) -> SetupResult<R> {
-        crate::EXECUTOR.register_current_thread(self.worker.stealer(), parker.unparker().clone());
-        let main_task = MainTaskContext::new(parker.unparker().clone());
+    fn setup<R: 'static, F: Future<Output = R> + 'static>(&self, future: F) -> SetupResult<R> {
+        crate::EXECUTOR
+            .register_current_thread(self.worker.stealer(), self.parker.unparker().clone());
+        let main_task = MainTaskContext::new(self.parker.unparker().clone());
         let main_task_exited = main_task.exited();
-        let handle = self._spawn(
-            LocalFuture(future),
-            parker.unparker().clone(),
-            Some(main_task),
-        );
-        let mut receiver = Receiver::new(handle, parker.unparker().clone());
+        let handle = self._spawn(LocalFuture(future), Some(main_task));
+        let mut receiver = Receiver::new(handle, self.parker.unparker().clone());
         if let Some(res) = crate::EXECUTOR.poll_receiver(&mut receiver) {
             SetupResult::Ok(res.0)
         } else {
@@ -97,11 +96,10 @@ impl Executor {
         &self,
         mut receiver: Receiver<LocalRes<R>>,
         main_task_exited: Arc<AtomicBool>,
-        parker: &Parker,
     ) -> R {
         loop {
-            while let Some((future, worker)) = self.next() {
-                future.run(worker, parker.unparker().clone());
+            while let Some((future, local)) = self.next() {
+                future.run(local, self.parker.unparker().clone());
             }
             if main_task_exited.load(Ordering::Acquire) {
                 if let Some(res) = crate::EXECUTOR.poll_receiver(&mut receiver) {
@@ -110,9 +108,9 @@ impl Executor {
             }
             if self.local_worker.is_empty() && self.worker.is_empty() {
                 if let Some(future) = crate::EXECUTOR.steal(&self.worker) {
-                    future.run(self.worker.clone(), parker.unparker().clone());
+                    future.run(false, self.parker.unparker().clone());
                 } else {
-                    parker.park();
+                    self.parker.park();
                 }
             }
         }
@@ -120,16 +118,14 @@ impl Executor {
 
     pub(crate) fn spawn<R: 'static, F: Future<Output = R> + 'static>(
         &self,
-        unparker: Unparker,
         future: F,
     ) -> LocalJoinHandle<R> {
-        self._spawn(future, unparker, None)
+        self._spawn(future, None)
     }
 
     fn _spawn<R: 'static, F: Future<Output = R> + 'static>(
         &self,
         future: F,
-        unparker: Unparker,
         main_task: Option<MainTaskContext>,
     ) -> LocalJoinHandle<R> {
         let future = LocalFuture(future);
@@ -145,7 +141,7 @@ impl Executor {
             main_task,
         );
         let canceled = future.canceled();
-        future.run(self.local_worker.clone(), unparker);
+        future.run(true, self.parker.unparker().clone());
         LocalJoinHandle(JoinHandle::new(
             id,
             receiver,

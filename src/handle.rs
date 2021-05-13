@@ -14,12 +14,12 @@ use std::{
 /// Wait for a spawned task to complete or cancel it.
 pub struct JoinHandle<R> {
     id: u64,
-    receiver_fut: Pin<Box<dyn Future<Output = Result<R, flume::RecvError>>>>,
+    receiver_fut: Pin<Box<dyn Future<Output = Result<R, flume::RecvError>> + Send>>,
     state: State,
     canceled: Arc<AtomicBool>,
 }
 
-impl<R: 'static> JoinHandle<R> {
+impl<R: Send + 'static> JoinHandle<R> {
     pub(crate) fn new(
         id: u64,
         receiver: flume::Receiver<R>,
@@ -52,8 +52,6 @@ impl<R> Future for JoinHandle<R> {
             .map(|res| res.expect("inner channel isn't expected to fail"))
     }
 }
-
-unsafe impl<R: Send> Send for JoinHandle<R> {}
 
 impl<R> fmt::Debug for JoinHandle<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

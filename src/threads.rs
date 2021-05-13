@@ -2,7 +2,7 @@ use crate::future_holder::FutureHolder;
 
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{atomic::Ordering, Arc},
     thread::{self, ThreadId},
 };
 
@@ -21,6 +21,7 @@ impl Threads {
             .entry(thread::current().id())
             .and_modify(|(count, _, _)| *count += 1)
             .or_insert((1, stealer, unparker));
+        crate::RUNS_WORKER.with(|runs_worker| runs_worker.store(true, Ordering::Release));
     }
 
     fn deregister(&self, thread: ThreadId) {
@@ -34,6 +35,7 @@ impl Threads {
 
     pub(crate) fn deregister_current(&self) {
         self.deregister(thread::current().id());
+        crate::RUNS_WORKER.with(|runs_worker| runs_worker.store(false, Ordering::Release));
         self.unpark_random();
     }
 

@@ -62,9 +62,12 @@ impl GlobalExecutor {
             None,
         );
         let canceled = future.canceled();
-        self.injector.push(future);
-        self.threads.unpark_random();
+        self.push_future(future);
         JoinHandle::new(id, receiver, self.state.clone(), canceled)
+    }
+
+    pub(crate) fn push_future(&self, future: FutureHolder) {
+        self.injector.push(future);
     }
 
     pub(crate) fn register_current_thread(

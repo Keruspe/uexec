@@ -10,7 +10,6 @@ use std::{
     task::{Context, Poll},
 };
 
-use crossbeam_deque::Worker;
 use crossbeam_utils::sync::Unparker;
 
 /* Holds the future and its waker */
@@ -18,7 +17,6 @@ pub(crate) struct FutureHolder {
     id: u64,
     future: Pin<Box<dyn Future<Output = ()> + Send>>,
     state: State,
-    worker: Option<Arc<Worker<Self>>>,
     pollable: Arc<AtomicBool>,
     canceled: Arc<AtomicBool>,
     main_task: Option<MainTaskContext>,
@@ -35,7 +33,6 @@ impl FutureHolder {
             id,
             future: Box::pin(future),
             state,
-            worker: None,
             pollable: Arc::new(AtomicBool::new(true)),
             canceled: Arc::new(AtomicBool::new(false)),
             main_task,
@@ -50,7 +47,7 @@ impl FutureHolder {
         self.canceled.clone()
     }
 
-    pub(crate) fn run(mut self, worker: Arc<Worker<Self>>, unparker: Unparker) {
+    pub(crate) fn run(mut self, local: bool, unparker: Unparker) {
         if self.canceled.load(Ordering::Acquire) {
             self.last_run();
             return;
@@ -58,21 +55,17 @@ impl FutureHolder {
 
         let waker = Arc::new(MyWaker::new(
             self.id,
-            Some(worker.clone()),
-            Some(unparker),
             self.state.clone(),
             self.pollable.clone(),
+            unparker,
         ))
         .into();
-        self.worker = Some(worker);
         let mut ctx = Context::from_waker(&waker);
         match self.future.as_mut().poll(&mut ctx) {
             Poll::Ready(()) => self.exit_main_task(),
             Poll::Pending => {
                 if self.pollable.swap(false, Ordering::AcqRel) {
-                    if let Some(worker) = self.worker.clone() {
-                        worker.push(self);
-                    }
+                    crate::LOCAL_EXECUTOR.with(|executor| executor.push_future(self, local));
                 } else {
                     self.state.clone().register_future(self);
                 }
@@ -92,6 +85,3 @@ impl FutureHolder {
         }
     }
 }
-
-unsafe impl Send for FutureHolder {}
-unsafe impl Sync for FutureHolder {}
